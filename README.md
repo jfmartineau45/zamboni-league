@@ -22,7 +22,6 @@ A full-stack fantasy hockey league manager built for NHL Legacy (PS3) leagues. M
 ### 1. Install dependencies
 
 ```bash
-cd roster-app
 pip install flask pyjwt python-dotenv aiohttp discord.py
 ```
 
@@ -43,8 +42,9 @@ Open `http://localhost:3000` — first visit creates `server/league.db` automati
 
 ```bash
 cp bot/.env.example bot/.env
-# Edit bot/.env with your Discord token and server details
 ```
+
+Edit `bot/.env` with your Discord token and server details (see [Environment Variables](#environment-variables) below).
 
 ### 4. Start the bot
 
@@ -52,7 +52,7 @@ cp bot/.env.example bot/.env
 python -m bot.bot
 ```
 
-Or use the **🤖 Discord Bot** control in the web app's Settings (admin only).
+Alternatively, use the **🤖 Discord Bot** control panel in the web app's Settings (admin login required) for easy start/stop without needing a terminal.
 
 ## Project Structure
 
