@@ -84,8 +84,12 @@ class ScoreApprovalView(discord.ui.View):
             ch_id = config.SCORES_CHANNEL
 
         scores_ch = None
-        if ch_id and config.GUILD_ID:
-            guild = self.bot_ref.get_guild(config.GUILD_ID) if hasattr(self, 'bot_ref') else None
+        if ch_id:
+            # Prefer the guild from the interaction (works in both channel and DM contexts).
+            # Fall back to bot cache lookup so DM approvals still work.
+            guild = interaction.guild or (
+                self.bot_ref.get_guild(config.GUILD_ID) if config.GUILD_ID else None
+            )
             scores_ch = guild.get_channel(ch_id) if guild else None
 
         state    = await get_state()

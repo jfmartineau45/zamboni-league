@@ -269,7 +269,9 @@ class TradeApprovalView(discord.ui.View):
         except (ValueError, AttributeError):
             ch_id = config.TRADES_CHANNEL
 
-        guild = self.bot_ref.get_guild(config.GUILD_ID) if (hasattr(self, 'bot_ref') and config.GUILD_ID) else None
+        guild = interaction.guild or (
+            self.bot_ref.get_guild(config.GUILD_ID) if config.GUILD_ID else None
+        )
         ch = guild.get_channel(ch_id) if (guild and ch_id) else None
 
         if ch:
