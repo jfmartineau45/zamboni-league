@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from bot.api import api_post, get_teams, get_state
 from bot import config
+from bot.embeds import trade_result_embed, trade_pending_embed, _site_button
 
 
 # ── Admin check ───────────────────────────────────────────────────────────────
@@ -178,26 +179,8 @@ class TradeCog(commands.Cog):
 
         req_id = body['id']
         teams  = await get_teams()
-        from_name = _name_for(from_code, teams)
-        to_name   = _name_for(to_code, teams)
-
-        embed = discord.Embed(
-            title='🔄 Trade Submitted — Pending Review',
-            color=discord.Color.orange(),
-        )
-        embed.add_field(
-            name=f'{from_name} sends',
-            value='\n'.join(f'• {p}' for p in players_sent) or '—',
-            inline=True,
-        )
-        embed.add_field(
-            name=f'{to_name} sends',
-            value='\n'.join(f'• {p}' for p in players_received) or '—',
-            inline=True,
-        )
-        if notes.strip():
-            embed.add_field(name='Notes', value=notes.strip(), inline=False)
-        embed.set_footer(text=f'ID: {req_id[:8]}…  •  By {interaction.user.display_name}')
+        state  = await get_state()
+        embed  = trade_pending_embed(payload, teams, state, interaction.user.display_name, req_id)
 
         # Confirm to admin submitter
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -290,30 +273,11 @@ class TradeApprovalView(discord.ui.View):
         ch = guild.get_channel(ch_id) if (guild and ch_id) else None
 
         if ch:
-            teams = await get_teams()
-            from_name = _name_for(self.payload['fromTeam'], teams)
-            to_name   = _name_for(self.payload['toTeam'], teams)
-            result_embed = discord.Embed(title='🔄 Trade Processed', color=discord.Color.green())
-            result_embed.add_field(
-                name=f'{from_name} sends',
-                value='\n'.join(f'• {p}' for p in self.payload.get('playersSent', [])) or '—',
-                inline=True,
-            )
-            result_embed.add_field(
-                name=f'{to_name} sends',
-                value='\n'.join(f'• {p}' for p in self.payload.get('playersReceived', [])) or '—',
-                inline=True,
-            )
-            if self.payload.get('notes'):
-                result_embed.add_field(name='Notes', value=self.payload['notes'], inline=False)
-            result_embed.add_field(
-                name='\u200b',
-                value=f'_See the full Trade Wire at [the league site]({config.APP_URL})_',
-                inline=False,
-            )
-            result_embed.set_footer(text=f'Approved by {interaction.user.display_name}')
+            teams  = await get_teams()
+            state  = await get_state()
+            result_embed = trade_result_embed(self.payload, teams, state, interaction.user.display_name)
             try:
-                await ch.send(embed=result_embed, view=_website_view())
+                await ch.send(embed=result_embed, view=_site_button())
                 log.info(f'Trade posted to channel {ch_id}')
             except Exception as e:
                 log.error(f'Failed to post trade to channel {ch_id}: {e}')

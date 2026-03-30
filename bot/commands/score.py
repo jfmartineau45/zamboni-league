@@ -9,6 +9,7 @@ from discord.ext import commands
 from bot.api import api_post, api_patch, get_state, get_teams
 from bot import config
 from bot.screenshot import capture
+from bot.embeds import score_result_embed, score_pending_embed, _site_button
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -88,15 +89,19 @@ class ScoreApprovalView(discord.ui.View):
             guild = self.bot_ref.get_guild(config.GUILD_ID) if hasattr(self, 'bot_ref') else None
             scores_ch = guild.get_channel(ch_id) if guild else None
 
-        screenshot = await capture('standings')
-        embed = discord.Embed(title='🏒 Game Result', description=line, color=discord.Color.blue())
-        embed.set_footer(text=f'Submitted by {self.submitter}  •  See full stats on the site')
+        state    = await get_state()
+        # Enrich payload with week number from game record
+        game_rec = next((g for g in state.get('games', []) if g['id'] == self.payload.get('gameId')), {})
+        enriched = {**self.payload, 'week': game_rec.get('week', 1)}
+
+        result_embed = score_result_embed(enriched, state, interaction.user.display_name)
+        screenshot   = await capture('standings')
 
         if scores_ch:
             if screenshot:
-                await scores_ch.send(file=screenshot, view=_website_view())
+                await scores_ch.send(embed=result_embed, file=screenshot, view=_site_button())
             else:
-                await scores_ch.send(embed=embed, view=_website_view())
+                await scores_ch.send(embed=result_embed, view=_site_button())
         else:
             # No channel configured — log a warning but don't crash
             import logging
@@ -230,12 +235,8 @@ class ScoreCog(commands.Cog):
         except (ValueError, AttributeError):
             pending_ch_id = config.PENDING_CHANNEL
 
-        pend_embed = discord.Embed(
-            title='📥 Score Pending Approval',
-            description=f"**{g['homeTeam']} {home_score} – {away_score} {g['awayTeam']}**{ot_tag}",
-            color=discord.Color.orange(),
-        )
-        pend_embed.set_footer(text=f'Week {g["week"]}  •  Submitted by {interaction.user.display_name}')
+        pend_state = await get_state()
+        pend_embed = score_pending_embed(payload, g, interaction.user.display_name, pend_state)
         view = ScoreApprovalView(req_id, payload, interaction.user.display_name, self.bot)
 
         # DM each admin
