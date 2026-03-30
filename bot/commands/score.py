@@ -8,7 +8,6 @@ from discord.ext import commands
 
 from bot.api import api_post, api_patch, get_state, get_teams
 from bot import config
-from bot.screenshot import capture
 from bot.embeds import score_result_embed, score_pending_embed, _site_button
 
 
@@ -95,13 +94,9 @@ class ScoreApprovalView(discord.ui.View):
         enriched = {**self.payload, 'week': game_rec.get('week', 1)}
 
         result_embed = score_result_embed(enriched, state, interaction.user.display_name)
-        screenshot   = await capture('standings')
 
         if scores_ch:
-            if screenshot:
-                await scores_ch.send(embed=result_embed, file=screenshot, view=_site_button())
-            else:
-                await scores_ch.send(embed=result_embed, view=_site_button())
+            await scores_ch.send(embed=result_embed, view=_site_button())
         else:
             # No channel configured — log a warning but don't crash
             import logging
