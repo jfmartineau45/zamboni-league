@@ -128,7 +128,8 @@ class StandingsCog(commands.Cog):
                 f"{r.get('gp',0):>3} {r['w']:>3} {r['l']:>3} {r['otl']:>3} {r['pts']:>4}"
             )
 
-        embed.description = f"```\n{'  '.join([''])}{chr(10).join(lines)}\n```"
+        table = '\n'.join(lines)
+        embed.description = '```\n' + table + '\n```'
         embed.set_footer(text=f'{played} of {total_games} games played')
 
         await interaction.followup.send(embed=embed, view=_website_view())
