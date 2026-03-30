@@ -103,8 +103,8 @@ class StandingsCog(commands.Cog):
             return
 
         league_name = state.get('league', {}).get('name', 'NHL Legacy League')
-        owners   = state.get('teamOwners', {})
-        managers = {m['id']: m['name'] for m in state.get('managers', [])}
+        owners      = state.get('teamOwners', {})
+        managers    = {m['id']: m['name'] for m in state.get('managers', [])}
         played      = sum(1 for g in state.get('games', []) if g.get('played'))
         total_games = len(state.get('games', []))
 
@@ -114,28 +114,21 @@ class StandingsCog(commands.Cog):
 
         embed = discord.Embed(title=title, color=SITE_RED)
 
-        # Build table — show all teams (leagues are small)
-        header  = f"{'':5}{'TEAM':<6} {'MGR':<14} {'GP':>3} {'W':>3} {'L':>3} {'OT':>3} {'PTS':>4} {'GF':>5} {'GA':>5} {'DIFF':>5}"
-        divider = '-' * len(header)
-        lines   = [header, divider]
-        medals  = {1: '1st', 2: '2nd', 3: '3rd'}
-        for i, r in enumerate(rows, 1):
+        # Top-5 teaser — rank, team, pts only. Full stats live on the site.
+        medals = {1: '🥇', 2: '🥈', 3: '🥉'}
+        lines  = []
+        for i, r in enumerate(rows[:5], 1):
             mgr_id = owners.get(r['code'], '')
-            mgr    = managers.get(mgr_id, '--')[:13]
-            medal  = medals.get(i, f'{i:2d}. ')
-            gf     = r.get('gf', 0)
-            ga     = r.get('ga', 0)
-            diff   = gf - ga
-            diff_s = ('+' if diff > 0 else '') + str(diff)
-            lines.append(
-                f"{medal:<5}{r['code']:<6} {mgr:<14} "
-                f"{r.get('gp',0):>3} {r['w']:>3} {r['l']:>3} {r['otl']:>3} {r['pts']:>4} "
-                f"{gf:>5} {ga:>5} {diff_s:>5}"
-            )
+            mgr    = managers.get(mgr_id, '')
+            medal  = medals.get(i, f'**{i}.**')
+            mgr_str = f'  *{mgr}*' if mgr else ''
+            lines.append(f"{medal}  **{r['code']}**  —  {r['pts']} pts{mgr_str}")
 
-        table = '\n'.join(lines)
-        embed.description = '```\n' + table + '\n```'
-        embed.set_footer(text=f'{played} of {total_games} games played')
+        if len(rows) > 5:
+            lines.append(f'*… and {len(rows) - 5} more teams*')
+
+        embed.description = '\n'.join(lines)
+        embed.set_footer(text=f'{played} of {total_games} games played  ·  Full stats on the site')
 
         await interaction.followup.send(embed=embed, view=_website_view())
 
