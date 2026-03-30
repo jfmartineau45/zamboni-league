@@ -115,17 +115,22 @@ class StandingsCog(commands.Cog):
         embed = discord.Embed(title=title, color=SITE_RED)
 
         # Build table — show all teams (leagues are small)
-        header = f"{'':4} {'TEAM':<6} {'MGR':<14} {'GP':>3} {'W':>3} {'L':>3} {'OT':>3} {'PTS':>4}\n"
-        header += '─' * 44
-        lines  = [header]
-        medals = {1: '🥇', 2: '🥈', 3: '🥉'}
+        header  = f"{'':5}{'TEAM':<6} {'MGR':<14} {'GP':>3} {'W':>3} {'L':>3} {'OT':>3} {'PTS':>4} {'GF':>5} {'GA':>5} {'DIFF':>5}"
+        divider = '-' * len(header)
+        lines   = [header, divider]
+        medals  = {1: '1st', 2: '2nd', 3: '3rd'}
         for i, r in enumerate(rows, 1):
-            mgr_id  = owners.get(r['code'], '')
-            mgr     = managers.get(mgr_id, '—')[:13]
-            medal   = medals.get(i, f' {i}.')
+            mgr_id = owners.get(r['code'], '')
+            mgr    = managers.get(mgr_id, '--')[:13]
+            medal  = medals.get(i, f'{i:2d}. ')
+            gf     = r.get('gf', 0)
+            ga     = r.get('ga', 0)
+            diff   = gf - ga
+            diff_s = ('+' if diff > 0 else '') + str(diff)
             lines.append(
-                f"{medal:<4} {r['code']:<6} {mgr:<14} "
-                f"{r.get('gp',0):>3} {r['w']:>3} {r['l']:>3} {r['otl']:>3} {r['pts']:>4}"
+                f"{medal:<5}{r['code']:<6} {mgr:<14} "
+                f"{r.get('gp',0):>3} {r['w']:>3} {r['l']:>3} {r['otl']:>3} {r['pts']:>4} "
+                f"{gf:>5} {ga:>5} {diff_s:>5}"
             )
 
         table = '\n'.join(lines)

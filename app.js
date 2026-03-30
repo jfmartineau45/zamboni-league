@@ -2239,6 +2239,9 @@ function renderStandings() {
             <th class="ct-th-pts">PTS</th>
             <th class="ct-th-num">P%</th>
             <th class="ct-th-num">RW</th>
+            <th class="ct-th-num">GF</th>
+            <th class="ct-th-num">GA</th>
+            <th class="ct-th-num">DIFF</th>
           </tr>
         </thead>
         <tbody>
@@ -2259,6 +2262,9 @@ function renderStandings() {
               <td class="ct-td-pts">${t.pts}</td>
               <td class="ct-td-num ct-pct">${pct(t)}</td>
               <td class="ct-td-num">${t.rw}</td>
+              <td class="ct-td-num">${t.gf}</td>
+              <td class="ct-td-num">${t.ga}</td>
+              <td class="ct-td-num" style="color:${t.gf-t.ga>0?'var(--success)':t.gf-t.ga<0?'var(--danger)':'var(--text-muted)'}">${t.gf-t.ga>0?'+':''}${t.gf-t.ga}</td>
             </tr>`).join('')}
         </tbody>
       </table>
@@ -2918,6 +2924,8 @@ function viewSeasonModal(seasonId) {
       <td><span style="display:inline-flex;align-items:center;gap:6px">${teamLogoLg(t.teamCode,32)}<strong>${t.teamCode}</strong></span></td>
       <td class="text-muted text-sm">${teamOwnerName(t.teamCode)}</td>
       <td class="num">${t.gp}</td><td class="num">${t.w}</td><td class="num">${t.l}</td><td class="num pts-col">${t.pts}</td>
+      <td class="num">${t.gf??''}</td><td class="num">${t.ga??''}</td>
+      <td class="num" style="color:${(t.gf-t.ga)>0?'var(--success)':(t.gf-t.ga)<0?'var(--danger)':'inherit'}">${t.gf!=null?(t.gf-t.ga>0?'+':'')+(t.gf-t.ga):''}</td>
     </tr>`).join('');
   const gp = (s.games||[]).filter(g=>g.played&&!g.playoff).length;
   const trades = (s.trades||[]).length;
@@ -2932,7 +2940,7 @@ function viewSeasonModal(seasonId) {
     </div>
     <div class="table-wrap">
       <table class="standings-table">
-        <thead><tr><th>#</th><th>Team</th><th>Manager</th><th>GP</th><th>W</th><th>L</th><th class="pts-col">PTS</th></tr></thead>
+        <thead><tr><th>#</th><th>Team</th><th>Manager</th><th>GP</th><th>W</th><th>L</th><th class="pts-col">PTS</th><th>GF</th><th>GA</th><th>DIFF</th></tr></thead>
         <tbody>${top8}</tbody>
       </table>
     </div>
