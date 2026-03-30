@@ -631,7 +631,6 @@ function renderDashboard() {
   const sysData = normalizeSysDataFile(state.sysDataFile);
   const standings = calcStandings();
   const recentGames = sortGames(state.games.filter(g=>g.played && !g.playoff)).reverse().slice(0,6);
-  const upcoming    = sortGames(state.games.filter(g=>!g.played && !g.playoff)).slice(0,4);
   const recentTrades = [...state.trades].sort((a,b) => (b.date||'').localeCompare(a.date||'')).slice(0,5);
 
   const gamesPlayed = state.games.filter(g=>g.played && !g.playoff).length;
@@ -642,6 +641,7 @@ function renderDashboard() {
     return unplayedWeeks.length > 0 ? Math.min(...unplayedWeeks) : (gamesPlayed > 0 ? Math.max(...state.games.map(g => g.week || 1)) : 1);
   })();
   const currentWeek = state.currentWeek !== null ? state.currentWeek : autoWeek;
+  const upcoming    = sortGames(state.games.filter(g=>!g.played && !g.playoff && g.week === currentWeek)).slice(0,8);
 
   const fmtTradeName = p => typeof p === 'string' ? p : (PLAYER_DB[p] || `#${p}`);
 
