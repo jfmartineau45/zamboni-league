@@ -94,7 +94,7 @@ class ScoreApprovalView(discord.ui.View):
 
         state    = await get_state()
         # Enrich payload with week number from game record
-        game_rec = next((g for g in state.get('games', []) if g['id'] == self.payload.get('gameId')), {})
+        game_rec = next((g for g in state.get('games', []) if str(g['id']) == str(self.payload.get('gameId', ''))), {})
         enriched = {**self.payload, 'week': game_rec.get('week', 1)}
 
         result_embed = score_result_embed(enriched, state, interaction.user.display_name)
@@ -181,7 +181,7 @@ class ScoreCog(commands.Cog):
 
         # Look up the game by ID
         state   = await get_state()
-        g       = next((x for x in state.get('games', []) if x['id'] == game), None)
+        g       = next((x for x in state.get('games', []) if str(x['id']) == str(game)), None)
 
         if not g:
             await interaction.followup.send('Game not found. Try again.', ephemeral=True)
