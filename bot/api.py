@@ -49,10 +49,25 @@ async def api_patch(path: str, data: dict, token: str = '') -> tuple[int, dict]:
             return r.status, body
 
 
+def _normalize_ids(state: dict) -> dict:
+    """Coerce all game/player/team IDs to strings so comparisons never fail
+    due to int vs str mismatches (JSON can return either)."""
+    for g in state.get('games', []):
+        if 'id' in g:
+            g['id'] = str(g['id'])
+    for p in state.get('players', []):
+        if 'id' in p:
+            p['id'] = str(p['id'])
+    for t in state.get('teams', []):
+        if 'id' in t:
+            t['id'] = str(t['id'])
+    return state
+
+
 async def get_state() -> dict:
     status, data = await api_get('/api/state')
     if status == 200 and isinstance(data, dict):
-        return data
+        return _normalize_ids(data)
     return {}
 
 
