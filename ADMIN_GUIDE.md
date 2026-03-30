@@ -102,15 +102,15 @@ Or use the **🤖 Discord Bot** panel in the website's Settings (easier).
 ### Players & Rosters
 
 **PLAYERS tab:**
-- View all players in league
-- Edit OVR (overall) and PLT (position) ratings
-- Import player data from PS3 SYS-DATA files
+- View all players in the NHL (pulled from NHL API)
+- Edit OVR (overall rating) and PLT (position) for each player
+- Changes apply instantly across all rosters
 
-**Import from PS3:**
-1. Export your league's save file from PS3
-2. Go to Settings → **SYS-DATA Upload**
-3. Drop the file to import rosters
-4. Players are auto-updated; existing rosters refresh
+**Roster Management:**
+- Each team's roster is managed from the **TEAMS tab**
+- Add/remove players from team rosters
+- Player OVR/PLT ratings are stored locally in `players_ovr_plt_all.txt`
+- Rosters sync with NHL player database automatically
 
 ### Discord Configuration
 

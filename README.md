@@ -4,7 +4,7 @@ A full-stack fantasy hockey league manager built for NHL Legacy (PS3) leagues. M
 
 **Live Features:**
 - 📊 Real-time standings with GF, GA, DIFF
-- 🎮 Roster management (import from PS3 SYS-DATA files)
+- 🎮 Roster management (NHL API players + custom OVR/PLT ratings)
 - 🏒 Score submission and admin approval workflow
 - 🔄 Trade tracking with player ratings
 - 💬 Discord bot integration with rich embeds
@@ -71,8 +71,7 @@ roster-app/
 │   │   ├── auth.py               # JWT authentication
 │   │   ├── state.py              # League state GET/POST
 │   │   ├── games.py              # Teams, scores
-│   │   ├── pending.py            # Approval queue
-│   │   └── sysdata.py            # PS3 file upload/download
+│   │   └── pending.py            # Approval queue
 │   └── botmanager.py             # Bot process control
 └── bot/
     ├── bot.py                    # Discord client
@@ -154,7 +153,7 @@ Displays:
 
 **Settings** tab (admin login) includes:
 - Team/Manager setup
-- Player roster imports (from PS3 SYS-DATA)
+- Player roster management (NHL API players with custom OVR/PLT)
 - Discord bot control
 - Discord channel configuration (scores, trades, pending, approvals)
 - Season snapshots
@@ -205,9 +204,10 @@ python -m bot.bot
 - Subsequent logins must match the stored hash
 - Check `NHL_JWT_SECRET` matches between server and requests
 
-**SYS-DATA import shows no players**
-- Make sure the PS3 file was exported correctly from NHL Legacy
-- File must be a valid PS3 RosterFile binary
+**Players not showing in roster**
+- Make sure the NHL API is reachable (check network)
+- Player OVR/PLT ratings should be in `players_ovr_plt_all.txt`
+- Try fetching fresh player data from NHL API in the admin panel
 
 ## For Users & Admins
 
