@@ -21,7 +21,6 @@ Your league at a glance.
 - **Recent Results** — Last 5 completed games shown as NHL-style scoreboard rows with team logos, final scores, OT/SO indicators, and manager names
 - **Upcoming Games** — Next 5 scheduled matchups with dates and manager names
 - **Playoff Race** — Live bubble tracker showing teams ranked 10–22. A dividing line marks the playoff cutoff (top 16 advance). Each row shows the team's point differential vs the cutline — green means in, red means out
-- **Download SYS-DATA** — If the admin has uploaded the current SYS-DATA file, a download strip appears here so any member can grab it instantly — no file sharing needed
 
 ---
 
@@ -126,12 +125,6 @@ League configuration — most options are admin-only.
 ### NHL Roster Data
 - **Refresh Roster** — Pull the latest player data from NHL.com
 - Roster refreshes automatically on startup; this button is for manual updates only
-
-### SYS-DATA Distribution *(admin only)*
-- Upload the current **SYS-DATA** binary file here
-- Once uploaded, all league members can download it directly from the Dashboard
-- Shows file name, size, and upload date
-- Admin can replace or remove the file at any time
 
 ### Season Management *(admin only)*
 - **Save Season Snapshot** — Archives the current season (games, standings, draft, trades, playoffs) with a label

@@ -1,6 +1,6 @@
 # Zamboni League — NHL Legacy League Manager
 
-A full-stack fantasy hockey league manager built for NHL Legacy (PS3) leagues. Manage rosters, track scores, standings, trades, and Discord notifications — all in one place.
+A full-stack fantasy hockey league manager built for NHL Legacy leagues. Manage rosters, track scores, standings, trades, and Discord notifications — all in one place.
 
 **Live Features:**
 - 📊 Real-time standings with GF, GA, DIFF
