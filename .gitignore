@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Database — never commit real league data
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# Backups — keep locally, never commit
+server/SEASON*_BACKUP_*.json
+server/SEASON*_BACKUP_*.db
+server/*.backup.*.db
+
+# Bot secrets — copy .env.example and fill in your values
+bot/.env
+
+# Screenshots and generated assets
+assets/Screenshot_*.png
+players/Screenshot_*.png
+
+# SYS-DATA binary files (large game files)
+SYS-DATA
+"SYS-DATA (1)"
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Playwright browser cache
+playwright-chromium/

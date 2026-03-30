@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NHL Legacy League Manager</title>
+  <link rel="stylesheet" href="styles.css?v=24">
+</head>
+<body>
+  <div id="app">
+
+    <!-- HEADER -->
+    <header id="app-header">
+      <div class="header-brand">
+        <img src="assets/zamboni.png" class="brand-zamboni" alt="Zamboni">
+        <span id="league-title">NHL Legacy League</span>
+      </div>
+      <nav id="main-nav">
+        <button class="nav-btn active" data-section="dashboard">Dashboard</button>
+        <button class="nav-btn" data-section="teams">Teams</button>
+        <button class="nav-btn" data-section="players">Players</button>
+        <button class="nav-btn" data-section="draft">Draft</button>
+        <button class="nav-btn" data-section="schedule">Schedule</button>
+        <button class="nav-btn" data-section="standings">Standings</button>
+        <button class="nav-btn" data-section="playoffs">Playoffs</button>
+        <button class="nav-btn" data-section="trades">Trades</button>
+        <button class="nav-btn" data-section="rules">Rules</button>
+        <button class="nav-btn" data-section="settings">Settings</button>
+      </nav>
+      <div id="header-right">
+        <span id="admin-badge" class="badge-admin hidden">ADMIN</span>
+        <button id="admin-toggle-btn" class="btn btn-sm btn-ghost">Admin Login</button>
+      </div>
+    </header>
+
+    <!-- MAIN CONTENT -->
+    <main id="main-content">
+      <section id="section-dashboard" class="section active"></section>
+      <section id="section-teams"     class="section"></section>
+      <section id="section-players"   class="section"></section>
+      <section id="section-draft"     class="section"></section>
+      <section id="section-schedule"  class="section"></section>
+      <section id="section-standings" class="section"></section>
+      <section id="section-playoffs"  class="section"></section>
+      <section id="section-trades"    class="section"></section>
+      <section id="section-rules"     class="section"></section>
+      <section id="section-settings"  class="section"></section>
+    </main>
+
+    <!-- MODAL -->
+    <div id="modal-overlay" class="hidden" role="dialog" aria-modal="true">
+      <div id="modal-box">
+        <div id="modal-header">
+          <h2 id="modal-title">Modal</h2>
+          <button id="modal-close-btn" aria-label="Close">&#10005;</button>
+        </div>
+        <div id="modal-body"></div>
+      </div>
+    </div>
+
+    <!-- TOAST -->
+    <div id="toast-container" aria-live="polite"></div>
+
+  </div>
+
+  <script src="app.js?v=26"></script>
+</body>
+</html>
