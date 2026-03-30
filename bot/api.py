@@ -61,3 +61,9 @@ async def get_teams() -> list[dict]:
     if status == 200 and isinstance(data, list):
         return data
     return []
+
+
+async def get_discord_config() -> dict:
+    """Return discordConfig from league state, or empty dict if not set."""
+    state = await get_state()
+    return state.get('discordConfig') or {}

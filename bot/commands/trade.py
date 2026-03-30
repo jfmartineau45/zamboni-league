@@ -202,11 +202,22 @@ class TradeCog(commands.Cog):
         # Confirm to admin submitter
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-        # DM all admins with approval buttons
-        if config.ADMIN_ROLE_ID and interaction.guild:
+        # Notify admins — via DM and/or pending channel based on config
+        from bot.api import get_discord_config
+        dc        = await get_discord_config()
+        admin_dm  = dc.get('adminDm', True)
+        raw_pc_id = dc.get('pendingChannel') or ''
+        try:
+            pending_ch_id = int(raw_pc_id) if raw_pc_id.strip() else config.PENDING_CHANNEL
+        except (ValueError, AttributeError):
+            pending_ch_id = config.PENDING_CHANNEL
+
+        view = TradeApprovalView(req_id, payload, interaction.user.display_name, self.bot)
+
+        # DM each admin
+        if admin_dm and config.ADMIN_ROLE_ID and interaction.guild:
             role = interaction.guild.get_role(config.ADMIN_ROLE_ID)
             if role:
-                view = TradeApprovalView(req_id, payload, interaction.user.display_name, self.bot)
                 for member in role.members:
                     try:
                         await member.send(
@@ -216,6 +227,19 @@ class TradeCog(commands.Cog):
                         )
                     except discord.Forbidden:
                         pass
+
+        # Post to pending channel (if configured)
+        if pending_ch_id and interaction.guild:
+            pend_ch = interaction.guild.get_channel(pending_ch_id)
+            if pend_ch:
+                try:
+                    await pend_ch.send(
+                        content='📥 **New trade pending — click Approve or Reject:**',
+                        embed=embed,
+                        view=view,
+                    )
+                except Exception:
+                    pass
 
 
 # ── Approval view (posted to pending channel) ─────────────────────────────────
@@ -251,41 +275,53 @@ class TradeApprovalView(discord.ui.View):
             view=None,
         )
 
-        # Post to trades channel
-        # Note: Button is clicked in DM, so we need to find guild via bot
-        if config.TRADES_CHANNEL and config.GUILD_ID:
-            guild = self.bot_ref.get_guild(config.GUILD_ID) if hasattr(self, 'bot_ref') else None
-            print(f"[DEBUG] Guild lookup: GUILD_ID={config.GUILD_ID}, found={guild is not None}")
-            ch = guild.get_channel(config.TRADES_CHANNEL) if guild else None
-            print(f"[DEBUG] Channel lookup: TRADES_CHANNEL={config.TRADES_CHANNEL}, found={ch is not None}")
-            if ch:
-                teams = await get_teams()
-                from_name = _name_for(self.payload['fromTeam'], teams)
-                to_name   = _name_for(self.payload['toTeam'], teams)
-                result_embed = discord.Embed(title='🔄 Trade Processed', color=discord.Color.green())
-                result_embed.add_field(
-                    name=f'{from_name} sends',
-                    value='\n'.join(f'• {p}' for p in self.payload.get('playersSent', [])) or '—',
-                    inline=True,
-                )
-                result_embed.add_field(
-                    name=f'{to_name} sends',
-                    value='\n'.join(f'• {p}' for p in self.payload.get('playersReceived', [])) or '—',
-                    inline=True,
-                )
-                if self.payload.get('notes'):
-                    result_embed.add_field(name='Notes', value=self.payload['notes'], inline=False)
-                result_embed.add_field(
-                    name='\u200b',
-                    value=f'_See the full Trade Wire at [the league site]({config.APP_URL})_',
-                    inline=False,
-                )
-                result_embed.set_footer(text=f'Approved by {interaction.user.display_name}')
-                try:
-                    await ch.send(embed=result_embed, view=_website_view())
-                    print(f"[DEBUG] Trade posted to channel {config.TRADES_CHANNEL}")
-                except Exception as e:
-                    print(f"[ERROR] Failed to post trade to channel: {e}")
+        # Post to trades channel — prefer state config, fall back to .env
+        from bot.api import get_discord_config
+        import logging
+        log = logging.getLogger('nhl-bot')
+        dc = await get_discord_config()
+        raw_ch_id = dc.get('tradesChannel') or ''
+        try:
+            ch_id = int(raw_ch_id) if raw_ch_id.strip() else config.TRADES_CHANNEL
+        except (ValueError, AttributeError):
+            ch_id = config.TRADES_CHANNEL
+
+        guild = self.bot_ref.get_guild(config.GUILD_ID) if (hasattr(self, 'bot_ref') and config.GUILD_ID) else None
+        ch = guild.get_channel(ch_id) if (guild and ch_id) else None
+
+        if ch:
+            teams = await get_teams()
+            from_name = _name_for(self.payload['fromTeam'], teams)
+            to_name   = _name_for(self.payload['toTeam'], teams)
+            result_embed = discord.Embed(title='🔄 Trade Processed', color=discord.Color.green())
+            result_embed.add_field(
+                name=f'{from_name} sends',
+                value='\n'.join(f'• {p}' for p in self.payload.get('playersSent', [])) or '—',
+                inline=True,
+            )
+            result_embed.add_field(
+                name=f'{to_name} sends',
+                value='\n'.join(f'• {p}' for p in self.payload.get('playersReceived', [])) or '—',
+                inline=True,
+            )
+            if self.payload.get('notes'):
+                result_embed.add_field(name='Notes', value=self.payload['notes'], inline=False)
+            result_embed.add_field(
+                name='\u200b',
+                value=f'_See the full Trade Wire at [the league site]({config.APP_URL})_',
+                inline=False,
+            )
+            result_embed.set_footer(text=f'Approved by {interaction.user.display_name}')
+            try:
+                await ch.send(embed=result_embed, view=_website_view())
+                log.info(f'Trade posted to channel {ch_id}')
+            except Exception as e:
+                log.error(f'Failed to post trade to channel {ch_id}: {e}')
+        else:
+            log.warning(
+                f'Trade approved but no trades channel found '
+                f'(state tradesChannel={raw_ch_id!r}, .env TRADES_CHANNEL={config.TRADES_CHANNEL})'
+            )
 
     @discord.ui.button(label='❌ Reject', style=discord.ButtonStyle.danger)
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):

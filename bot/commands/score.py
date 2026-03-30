@@ -74,19 +74,36 @@ class ScoreApprovalView(discord.ui.View):
         ot   = ' (OT)' if p.get('ot') else ''
         line = f"**{p['homeTeam']} {p['homeScore']} – {p['awayScore']} {p['awayTeam']}**{ot}"
 
-        screenshot = await capture('standings')
-        scores_ch  = None
-        if config.SCORES_CHANNEL and config.GUILD_ID:
-            guild = self.bot_ref.get_guild(config.GUILD_ID) if hasattr(self, 'bot_ref') else None
-            scores_ch = guild.get_channel(config.SCORES_CHANNEL) if guild else None
+        # Resolve scores channel: prefer state config, fall back to .env
+        from bot.api import get_discord_config
+        dc = await get_discord_config()
+        raw_ch_id = dc.get('scoresChannel') or ''
+        try:
+            ch_id = int(raw_ch_id) if raw_ch_id.strip() else config.SCORES_CHANNEL
+        except (ValueError, AttributeError):
+            ch_id = config.SCORES_CHANNEL
 
-        target = scores_ch or interaction.channel
-        if screenshot:
-            await target.send(file=screenshot, view=_website_view())
+        scores_ch = None
+        if ch_id and config.GUILD_ID:
+            guild = self.bot_ref.get_guild(config.GUILD_ID) if hasattr(self, 'bot_ref') else None
+            scores_ch = guild.get_channel(ch_id) if guild else None
+
+        screenshot = await capture('standings')
+        embed = discord.Embed(title='🏒 Game Result', description=line, color=discord.Color.blue())
+        embed.set_footer(text=f'Submitted by {self.submitter}  •  See full stats on the site')
+
+        if scores_ch:
+            if screenshot:
+                await scores_ch.send(file=screenshot, view=_website_view())
+            else:
+                await scores_ch.send(embed=embed, view=_website_view())
         else:
-            embed = discord.Embed(title='🏒 Game Result', description=line, color=discord.Color.blue())
-            embed.set_footer(text=f'Submitted by {self.submitter}  •  See full stats on the site')
-            await target.send(embed=embed, view=_website_view())
+            # No channel configured — log a warning but don't crash
+            import logging
+            logging.getLogger('nhl-bot').warning(
+                f'Score approved but no scores channel configured '
+                f'(state scoresChannel={raw_ch_id!r}, .env SCORES_CHANNEL={config.SCORES_CHANNEL})'
+            )
 
     @discord.ui.button(label='❌ Reject', style=discord.ButtonStyle.danger)
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -203,22 +220,42 @@ class ScoreCog(commands.Cog):
             ephemeral=True,
         )
 
-        # DM all admins with approval buttons
-        if config.ADMIN_ROLE_ID and interaction.guild:
+        # Notify admins — via DM and/or pending channel based on config
+        from bot.api import get_discord_config
+        dc        = await get_discord_config()
+        admin_dm  = dc.get('adminDm', True)
+        raw_pc_id = dc.get('pendingChannel') or ''
+        try:
+            pending_ch_id = int(raw_pc_id) if raw_pc_id.strip() else config.PENDING_CHANNEL
+        except (ValueError, AttributeError):
+            pending_ch_id = config.PENDING_CHANNEL
+
+        pend_embed = discord.Embed(
+            title='📥 Score Pending Approval',
+            description=f"**{g['homeTeam']} {home_score} – {away_score} {g['awayTeam']}**{ot_tag}",
+            color=discord.Color.orange(),
+        )
+        pend_embed.set_footer(text=f'Week {g["week"]}  •  Submitted by {interaction.user.display_name}')
+        view = ScoreApprovalView(req_id, payload, interaction.user.display_name, self.bot)
+
+        # DM each admin
+        if admin_dm and config.ADMIN_ROLE_ID and interaction.guild:
             role = interaction.guild.get_role(config.ADMIN_ROLE_ID)
             if role:
-                embed = discord.Embed(
-                    title='📥 Score Pending Approval',
-                    description=f"**{g['homeTeam']} {home_score} – {away_score} {g['awayTeam']}**{ot_tag}",
-                    color=discord.Color.orange(),
-                )
-                embed.set_footer(text=f'Week {g["week"]}  •  Submitted by {interaction.user.display_name}')
-                view = ScoreApprovalView(req_id, payload, interaction.user.display_name, self.bot)
                 for member in role.members:
                     try:
-                        await member.send(embed=embed, view=view)
+                        await member.send(embed=pend_embed, view=view)
                     except discord.Forbidden:
                         pass
+
+        # Post to pending channel (if configured)
+        if pending_ch_id and config.GUILD_ID and interaction.guild:
+            pend_ch = interaction.guild.get_channel(pending_ch_id)
+            if pend_ch:
+                try:
+                    await pend_ch.send(embed=pend_embed, view=view)
+                except Exception:
+                    pass
 
 
 async def setup(bot: commands.Bot):

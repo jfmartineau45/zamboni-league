@@ -155,6 +155,12 @@ const defaultState = () => ({
   teamCoOwners:       {},    // {teamCode: managerId} — secondary manager per team
   scheduleStartDate:  null,  // ISO date string for Week 1 start (used for week label display)
   rules:              null,  // league rules markdown string (null = use default)
+  discordConfig: {           // Discord bot channel/notification settings
+    scoresChannel:  '',      // Channel ID (string) where approved scores are posted
+    tradesChannel:  '',      // Channel ID (string) where approved trades are posted
+    pendingChannel: '',      // Channel ID (string) for pending approval posts (alternative to admin DMs)
+    adminDm:        true,    // DM each admin role member for approval requests
+  },
   playoffFormat: [           // configurable per-round series length
     { name: 'First Round',       winTo: 2 },  // Bo3
     { name: 'Second Round',      winTo: 3 },  // Bo5
@@ -3086,6 +3092,32 @@ function renderSettings() {
             <button class="btn btn-ghost btn-sm" id="bot-refresh-btn" title="Refresh status">↺</button>
           </div>
           <div id="bot-log" style="margin-top:10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:monospace;font-size:.68rem;color:var(--text-dim);max-height:160px;overflow-y:auto;white-space:pre-wrap;display:none"></div>
+        </div>
+
+        <div class="card" id="discord-channels-card">
+          <div class="card-title">📢 Discord Channels</div>
+          <p class="text-xs text-muted mb-12">
+            Right-click any channel in Discord → <strong>Copy Channel ID</strong> (requires Developer Mode in Discord settings).
+            Leave blank to disable that notification.
+          </p>
+          <div class="form-row">
+            <label>🏒 Scores Channel ID</label>
+            <input id="dc-scores" placeholder="e.g. 1363924034609217618" value="${(state.discordConfig||{}).scoresChannel||''}">
+          </div>
+          <div class="form-row">
+            <label>🔄 Trades Channel ID</label>
+            <input id="dc-trades" placeholder="e.g. 1363924034609217619" value="${(state.discordConfig||{}).tradesChannel||''}">
+          </div>
+          <div class="form-row">
+            <label>📥 Pending / Approvals Channel ID <span class="text-dim" style="font-size:.7rem;font-weight:400">(optional — alternative to admin DMs)</span></label>
+            <input id="dc-pending" placeholder="e.g. 1363924034609217620" value="${(state.discordConfig||{}).pendingChannel||''}">
+          </div>
+          <div class="form-row" style="align-items:center;gap:10px">
+            <label style="margin:0">DM admins for approvals</label>
+            <input type="checkbox" id="dc-admindm" ${(state.discordConfig||{}).adminDm !== false ? 'checked' : ''} style="width:auto;accent-color:var(--primary)">
+            <span class="text-xs text-dim">When checked, each admin gets a DM with Approve/Reject buttons</span>
+          </div>
+          <button class="btn btn-primary mt-12" id="save-discord-cfg-btn">Save Discord Settings</button>
         </div>` : ''}
 
         <div class="card">
@@ -3353,6 +3385,16 @@ function renderSettings() {
     btn.disabled = false; btn.textContent = '■ Stop Bot';
   });
   $('bot-refresh-btn')?.addEventListener('click', _refreshBotStatus);
+
+  $('save-discord-cfg-btn')?.addEventListener('click', () => {
+    if (!state.discordConfig) state.discordConfig = {};
+    state.discordConfig.scoresChannel  = ($('dc-scores')?.value  || '').trim();
+    state.discordConfig.tradesChannel  = ($('dc-trades')?.value  || '').trim();
+    state.discordConfig.pendingChannel = ($('dc-pending')?.value || '').trim();
+    state.discordConfig.adminDm        = $('dc-admindm')?.checked !== false;
+    saveState();
+    toast('Discord settings saved', 'success');
+  });
 
   $('migrate-server-btn')?.addEventListener('click', async () => {
     const btn = $('migrate-server-btn');
