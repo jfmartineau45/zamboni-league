@@ -8,10 +8,7 @@ from discord.ext import commands
 
 from bot.api import get_state
 from bot import config
-from bot.screenshot import capture
-
-# How many rows to show in Discord (teaser — full table is on the site)
-TEASER_ROWS = 5
+from bot.embeds import SITE_RED, _site_button
 
 
 def _compute_standings(state: dict) -> list[dict]:
@@ -106,55 +103,35 @@ class StandingsCog(commands.Cog):
             return
 
         league_name = state.get('league', {}).get('name', 'NHL Legacy League')
-        total_teams = len(rows)
+        owners   = state.get('teamOwners', {})
+        managers = {m['id']: m['name'] for m in state.get('managers', [])}
         played      = sum(1 for g in state.get('games', []) if g.get('played'))
         total_games = len(state.get('games', []))
 
-        # --- Build teaser table (top TEASER_ROWS only) ---
-        teaser = rows[:TEASER_ROWS]
-        header = f"{'#':<3} {'Team':<18} {'GP':>3} {'W':>3} {'L':>3} {'OT':>3} {'PTS':>4}\n"
-        header += '─' * 38 + '\n'
-        lines = []
-        for i, r in enumerate(teaser, 1):
-            medal = {1: '🥇', 2: '🥈', 3: '🥉'}.get(i, f'{i}.')
-            name  = r['name'][:16]
-            lines.append(f"{medal:<4} {name:<18} {r.get('gp',0):>3} {r['w']:>3} {r['l']:>3} {r['otl']:>3} {r['pts']:>4}")
-
-        table = header + '\n'.join(lines)
-
-        remaining = total_teams - TEASER_ROWS
-        footer_note = (
-            f'Showing top {TEASER_ROWS} of {total_teams} teams  •  '
-            f'{played}/{total_games} games played'
-        )
-
-        title = f'📊 {league_name} Standings'
+        title = f'📊  {league_name}'
         if conference:
-            title += f' — {conference.title()}'
+            title += f'  ·  {conference.title()}'
 
-        embed = discord.Embed(
-            title=title,
-            description=f'```\n{table}```',
-            color=discord.Color.dark_blue(),
-        )
+        embed = discord.Embed(title=title, color=SITE_RED)
 
-        if remaining > 0:
-            embed.add_field(
-                name='\u200b',
-                value=f'_...and **{remaining} more teams**. See the full table on the [league site]({config.APP_URL}/#standings)_',
-                inline=False,
+        # Build table — show all teams (leagues are small)
+        header = f"{'':4} {'TEAM':<6} {'MGR':<14} {'GP':>3} {'W':>3} {'L':>3} {'OT':>3} {'PTS':>4}\n"
+        header += '─' * 44
+        lines  = [header]
+        medals = {1: '🥇', 2: '🥈', 3: '🥉'}
+        for i, r in enumerate(rows, 1):
+            mgr_id  = owners.get(r['code'], '')
+            mgr     = managers.get(mgr_id, '—')[:13]
+            medal   = medals.get(i, f' {i}.')
+            lines.append(
+                f"{medal:<4} {r['code']:<6} {mgr:<14} "
+                f"{r.get('gp',0):>3} {r['w']:>3} {r['l']:>3} {r['otl']:>3} {r['pts']:>4}"
             )
 
-        embed.set_footer(text=footer_note)
+        embed.description = f"```\n{'  '.join([''])}{chr(10).join(lines)}\n```"
+        embed.set_footer(text=f'{played} of {total_games} games played')
 
-        # Grab screenshot of the standings section
-        screenshot = await capture('standings')
-
-        if screenshot:
-            embed.set_image(url='attachment://standings.png')
-            await interaction.followup.send(embed=embed, file=screenshot, view=_website_view())
-        else:
-            await interaction.followup.send(embed=embed, view=_website_view())
+        await interaction.followup.send(embed=embed, view=_website_view())
 
 
 async def setup(bot: commands.Bot):
