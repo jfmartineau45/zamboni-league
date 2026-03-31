@@ -33,7 +33,7 @@ echo "[setup] Initializing database..."
 python3 -c "from server.db import init_db; init_db()"
 
 # Start Flask server in background
-echo "[start] Starting Flask server on port 3000..."
+echo "[start] Starting Flask server on port 3001..."
 python3 -m server.server &
 FLASK_PID=$!
 
@@ -43,7 +43,7 @@ python3 -m bot.bot &
 BOT_PID=$!
 
 echo "[start] Both services started (PIDs: Flask=$FLASK_PID, Bot=$BOT_PID)"
-echo "[info] Flask: http://localhost:3000"
+echo "[info] Flask: http://localhost:3001"
 echo "[info] Discord bot: connected"
 echo ""
 echo "To stop: kill $FLASK_PID $BOT_PID"

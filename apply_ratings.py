@@ -11,7 +11,7 @@ import requests
 
 BASE    = Path(__file__).parent
 DB_PATH = BASE / 'server' / 'league.db'
-API     = 'http://localhost:3000'
+API     = 'http://localhost:3001'
 
 SESSION = requests.Session()
 

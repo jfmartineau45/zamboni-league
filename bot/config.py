@@ -22,7 +22,7 @@ def _int(key: str, default: int = 0) -> int:
 DISCORD_TOKEN   = os.environ.get('DISCORD_TOKEN', '')
 BOT_SECRET      = os.environ.get('NHL_BOT_SECRET', '')
 ADMIN_PASSWORD  = os.environ.get('ADMIN_PASSWORD', '')
-API_BASE        = os.environ.get('API_BASE', 'http://localhost:3000').rstrip('/')
+API_BASE        = os.environ.get('API_BASE', 'http://localhost:3001').rstrip('/')
 # Public-facing URL shown in Discord links (same as API_BASE if not set)
 APP_URL         = os.environ.get('APP_URL', '').rstrip('/') or API_BASE
 GUILD_ID        = _int('GUILD_ID')

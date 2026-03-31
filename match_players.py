@@ -12,7 +12,7 @@ import requests
 
 BASE    = Path(__file__).parent
 DB_PATH = BASE / 'server' / 'league.db'
-API     = 'http://localhost:3000'
+API     = 'http://localhost:3001'
 
 NHL_SEARCH = 'https://search.d3.nhle.com/api/v1/search/player'
 NHL_ROSTER = 'https://api-web.nhle.com/v1/roster/{team}/current'

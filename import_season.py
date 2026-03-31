@@ -6,7 +6,7 @@ Zamboni.gg Season 1 import — clean rebuild.
 3. Apply trades from trades.csv
 4. Load schedule from schedule.csv
 5. Apply results from results.csv
-6. POST complete state to http://localhost:3000
+6. POST complete state to http://localhost:3001
 
 Fantasy team code notes:
   Seattle  → WES  (Western All-Star slot in game)
@@ -24,7 +24,7 @@ import requests
 
 BASE      = Path(__file__).parent
 DB_PATH   = BASE / 'server' / 'league.db'
-API       = 'http://localhost:3000'
+API       = 'http://localhost:3001'
 DL        = Path.home() / 'Downloads'
 
 SESSION   = requests.Session()
@@ -662,7 +662,7 @@ def main():
                      headers={'Content-Type': 'application/json'}, timeout=30)
     print(f'  HTTP {r.status_code}')
     if r.status_code == 200:
-        print('\n✅  Import complete! Set your admin password at http://localhost:3000')
+        print('\n✅  Import complete! Set your admin password at http://localhost:3001')
     else:
         print(f'\n❌  {r.text[:300]}')
 

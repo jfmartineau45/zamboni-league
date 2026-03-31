@@ -15,6 +15,6 @@ from server.server import app
 
 if __name__ == '__main__':
     init_db()
-    port = int(os.environ.get('PORT', 3000))
+    port = int(os.environ.get('PORT', 3001))
     print(f"[NHL] Server running on http://localhost:{port}")
     app.run(host='0.0.0.0', port=port, debug=False)

@@ -96,7 +96,7 @@ def serve_static(path):
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     init_db()
-    port = int(os.environ.get('PORT', 3000))
+    port = int(os.environ.get('PORT', 3001))
     print(f"[server] NHL Legacy League API running on http://localhost:{port}")
     print(f"[server] Static files from: {STATIC_DIR}")
     app.run(host='0.0.0.0', port=port, debug=False)
