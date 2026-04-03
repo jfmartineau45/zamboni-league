@@ -17,7 +17,7 @@ env/
 server/SEASON*_BACKUP_*.json
 server/SEASON*_BACKUP_*.db
 server/*.backup.*.db
-
+server/league.db*
 # Bot secrets — copy .env.example and fill in your values
 bot/.env
 
