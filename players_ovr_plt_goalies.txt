@@ -49,7 +49,6 @@ Casey DeSmith  82  HYB
 Colten Ellis  82  HYB
 Elvis Merzlikins  82  HYB
 Eric Comrie  82  HYB
-Laurent Brossoit  82  HYB
 Petr Mrazek  82  HYB
 Philipp Grubauer  82  HYB
 Samuel Ersson  82  HYB

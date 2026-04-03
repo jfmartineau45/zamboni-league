@@ -14,7 +14,7 @@ import sys
 # when running from the roster-app/ directory
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from flask import Flask, send_from_directory
+from flask import Flask, request, send_from_directory
 
 from server.db import init_db
 from server.routes.auth import auth_bp
@@ -26,6 +26,9 @@ from server import botmanager
 
 # ── App setup ────────────────────────────────────────────────────────────────
 STATIC_DIR = os.path.dirname(os.path.dirname(__file__))   # roster-app/
+ALLOWED_CORS_ORIGINS = {
+    origin.strip() for origin in os.environ.get('NHL_CORS_ORIGINS', '').split(',') if origin.strip()
+}
 
 app = Flask(__name__, static_folder=None)
 
@@ -65,9 +68,14 @@ def bot_stop():
 
 @app.after_request
 def add_cors(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Admin-Token, X-Bot-Secret'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
+    origin = request.headers.get('Origin')
+    if not origin:
+        return response
+    if origin in ALLOWED_CORS_ORIGINS:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Vary'] = 'Origin'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Admin-Token, X-Bot-Secret'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
     return response
 
 @app.route('/api/<path:path>', methods=['OPTIONS'])

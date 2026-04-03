@@ -144,6 +144,7 @@ def _apply_score(state, payload):
             g['homeScore'] = home_score
             g['awayScore'] = away_score
             g['ot']        = ot
+            g['postedAt']  = datetime.now(timezone.utc).isoformat()
             # Determine winner
             if home_score > away_score:
                 g['winner'] = g['homeTeam']
@@ -153,9 +154,28 @@ def _apply_score(state, payload):
     raise ValueError(f"Game {game_id} not found")
 
 
+def _apply_trade_history(state):
+    """Python equivalent of JS applyTradeHistory() — replays all trades chronologically to set teamCode."""
+    def to_list(v):
+        if isinstance(v, list):
+            return v
+        return [v] if v else []
+
+    trades = sorted(state.get('trades', []), key=lambda t: t.get('date', ''))
+    player_map = {p['name']: p for p in state.get('players', [])}
+    for t in trades:
+        for name in to_list(t.get('playersSent', [])):
+            p = player_map.get(name)
+            if p:
+                p['teamCode'] = t['toTeam']
+        for name in to_list(t.get('playersReceived', [])):
+            p = player_map.get(name)
+            if p:
+                p['teamCode'] = t['fromTeam']
+
+
 def _apply_trade(state, payload):
-    """Append a trade record to the state."""
-    import time
+    """Append a trade record to the state and update player teamCode values."""
     trade = {
         'id':              payload.get('id', str(uuid.uuid4())),
         'date':            payload.get('date', datetime.now(timezone.utc).date().isoformat()),
@@ -166,3 +186,4 @@ def _apply_trade(state, payload):
         'notes':           payload.get('notes', ''),
     }
     state.setdefault('trades', []).insert(0, trade)
+    _apply_trade_history(state)

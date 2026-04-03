@@ -172,7 +172,7 @@ const defaultState = () => ({
 let state = defaultState();
 let isAdmin = false;
 let currentSection = 'dashboard';
-let _adminToken = localStorage.getItem('nhl-admin-token') || '';
+let _adminToken = sessionStorage.getItem('nhl-admin-token') || '';
 let _apiAvailable = false;    // true once we've successfully talked to /api/state
 
 function normalizeSysDataFile(file) {
@@ -194,10 +194,37 @@ async function _apiFetch(path, opts = {}) {
   return fetch(path, { ...opts, headers });
 }
 
+function clearAdminSession({ rerender = false } = {}) {
+  isAdmin = false;
+  _adminToken = '';
+  sessionStorage.removeItem('nhl-admin-token');
+  updateAdminUI();
+  if (rerender) renderSection(currentSection);
+}
+
+async function verifyAdminSession() {
+  if (!_adminToken) {
+    isAdmin = false;
+    return false;
+  }
+  try {
+    const r = await _apiFetch('api/auth/session', { method: 'GET' });
+    if (!r.ok) {
+      clearAdminSession();
+      return false;
+    }
+    isAdmin = true;
+    return true;
+  } catch {
+    clearAdminSession();
+    return false;
+  }
+}
+
 // Load state: try API first, fall back to localStorage
 async function loadState() {
   try {
-    const r = await _apiFetch('/api/state');
+    const r = await _apiFetch('api/state');
     if (r.ok) {
       const data = await r.json();
       if (data && Object.keys(data).length) {
@@ -393,39 +420,6 @@ function matchPlayerByAbbrev(abbrev) {
   return null;
 }
 
-function importRatings(text) {
-  // Each line: "M. BOLDY    91    PLY" (tabs or commas or 2+ spaces)
-  // PLT is any 2-4 char all-uppercase token that isn't a number
-  const isOvr = t => { const n = parseInt(t); return !isNaN(n) && n >= 60 && n <= 99; };
-  const isPlt = t => /^[A-Z]{2,4}$/.test(t);
-  let matched = 0, skipped = 0;
-  text.split('\n').forEach(line => {
-    line = line.trim();
-    if (!line) return;
-    // Tokenize on tabs, commas, or 2+ spaces
-    const tokens = line.split(/\t|,|  +/).map(t => t.trim().toUpperCase()).filter(Boolean);
-    if (tokens.length < 2) return;
-    let nameTokens = [], ovr = 0, plt = '';
-    tokens.forEach(t => {
-      if (!ovr && isOvr(t)) { ovr = parseInt(t); return; }
-      // PLT always follows OVR in this format — accept 1-4 uppercase letters after OVR is set
-      if (ovr && !plt && /^[A-Z]{1,4}$/.test(t) && !isOvr(t)) { plt = t; return; }
-      if (!ovr && !plt && isPlt(t) && !isOvr(t)) { plt = t; return; }
-      nameTokens.push(t);
-    });
-    const nameStr = nameTokens.join(' ').trim();
-    if (!nameStr || !ovr) { skipped++; return; }
-    // Normalize known PLT aliases
-    if (plt === 'VRN') plt = 'GRN';
-    if (plt === 'H' || plt === 'HY') plt = 'HYB';
-    const player = matchPlayerByAbbrev(nameStr);
-    if (player) { player.ovr = ovr; if (plt) player.plt = plt; matched++; }
-    else skipped++;
-  });
-  saveState();
-  return { matched, skipped };
-}
-
 function managerName(id) {
   const m = state.managers.find(m => m.id === id);
   return m ? m.name : '—';
@@ -460,6 +454,13 @@ function fmtDate(iso) {
   return isNaN(d) ? iso : d.toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
 }
 
+function fmtDateTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  return d.toLocaleDateString('en-US', { month:'short', day:'numeric' }) + ' · ' + d.toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
+}
+
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
 
 // ================================================================
@@ -479,6 +480,7 @@ function renderSection(section) {
     case 'dashboard': renderDashboard(); break;
     case 'teams':     renderTeams();     break;
     case 'players':   renderPlayers();   break;
+    case 'scores':    renderScores();    break;
     case 'draft':     renderDraft();     break;
     case 'schedule':  renderSchedule();  break;
     case 'standings': renderStandings(); break;
@@ -630,8 +632,13 @@ function renderDashboard() {
   const el_ = $('section-dashboard');
   const sysData = normalizeSysDataFile(state.sysDataFile);
   const standings = calcStandings();
-  const recentGames = sortGames(state.games.filter(g=>g.played && !g.playoff)).reverse().slice(0,6);
-  const recentTrades = [...state.trades].sort((a,b) => (b.date||'').localeCompare(a.date||'')).slice(0,5);
+  const recentGames = state.games
+    .filter(g => g.played && !g.playoff)
+    .sort((a, b) => (b.postedAt || b.playedAt || b.date || '').localeCompare(a.postedAt || a.playedAt || a.date || ''))
+    .slice(0, 6);
+  const recentTrades = [...state.trades]
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+    .slice(0, 5);
 
   const gamesPlayed = state.games.filter(g=>g.played && !g.playoff).length;
   const totalTeams  = Object.keys(state.teamOwners).length;
@@ -771,6 +778,7 @@ function renderDashboard() {
               <div class="sb-sep">
                 <span class="sb-ot">${g.ot ? 'OT' : ''}</span>
                 <span class="sb-vs">Final</span>
+                ${g.postedAt ? `<span class="sb-posted">${fmtDateTime(g.postedAt)}</span>` : (g.week ? `<span class="sb-posted">Wk ${g.week}</span>` : '')}
               </div>
               <div class="sb-team ${!homeWin ? 'sb-winner' : 'sb-loser'}">
                 <div class="sb-score ${!homeWin ? 'sb-score-win' : ''}">${g.awayScore}</div>
@@ -1293,410 +1301,59 @@ function getManagerTeam(managerId) {
   return Object.entries(state.teamOwners).find(([,mid]) => mid === managerId)?.[0] || '';
 }
 
+function getDraftModuleContext() {
+  return {
+    getState: () => state,
+    setState: (updater) => {
+      const next = typeof updater === 'function' ? updater(state) : updater;
+      if (next) state = next;
+    },
+    isAdmin: () => isAdmin,
+    saveState,
+    renderDraft: () => renderDraft(),
+    getManagerTeam,
+    managerName,
+    teamBadge,
+    teamLogoLg,
+    ovrBadge,
+    pltBadge,
+    posGroup,
+    positionLimits: POSITION_LIMITS,
+    showModal,
+    hideModal,
+    toast,
+    $, 
+  };
+}
+
 function renderDraft() {
-  const el_ = $('section-draft');
-
-  el_.innerHTML = `
-    <div class="page-header">
-      <h2>Draft</h2>
-      <div class="flex gap-8">
-        ${isAdmin && !state.liveDraft?.active ? `<button class="btn btn-primary btn-sm" id="setup-live-draft-btn">Setup Draft</button>` : ''}
-        ${isAdmin && state.liveDraft?.active ? `<button class="btn btn-secondary btn-sm" id="reset-live-draft-btn">Reset Draft</button>` : ''}
-      </div>
-    </div>
-    <div id="draft-tab-content"></div>
-  `;
-
-  $('setup-live-draft-btn')?.addEventListener('click', showSetupLiveDraft);
-  $('reset-live-draft-btn')?.addEventListener('click', () => {
-    if (confirm('Reset all live draft picks? Player team assignments made during the draft will NOT be reversed.')) {
-      const prevAuto = state.liveDraft?.autoManagers || [];
-      state.liveDraft = { active: false, rounds: 1, order: [], picks: [], autoManagers: prevAuto };
-      saveState();
-      renderDraft();
-    }
-  });
-
-  renderLiveDraftTab();
+  if (window.DraftModule?.renderDraft) {
+    window.DraftModule.renderDraft(getDraftModuleContext());
+  }
 }
 
 function renderLiveDraftTab() {
-  const container = $('draft-tab-content');
-  if (!container) return;
-  const draft = state.liveDraft || { active: false, picks: [], order: [], rounds: 1 };
-
-  if (!draft.active) {
-    container.innerHTML = `
-      <div class="empty-state" style="padding:60px 0">
-        <p>${state.players.length ? 'Draft not started yet.' : 'Fetch NHL rosters in Settings first to get the player list.'}</p>
-        ${isAdmin && state.players.length ? `<p class="mt-12"><button class="btn btn-primary" id="setup-live-draft-btn2">Setup Draft</button></p>` : ''}
-      </div>`;
-    $('setup-live-draft-btn2')?.addEventListener('click', showSetupLiveDraft);
-    return;
-  }
-
-  const managerCount = draft.order.length;
-  const totalPicks   = managerCount * draft.rounds;
-  const currentIdx   = draft.picks.length;
-  const isDone       = currentIdx >= totalPicks;
-
-  // Snake draft: even rounds forward, odd rounds reversed
-  const roundNum     = Math.floor(currentIdx / managerCount);
-  const pickInRound  = currentIdx % managerCount;
-  const roundOrder   = roundNum % 2 === 0 ? draft.order : [...draft.order].reverse();
-  const onClockId    = isDone ? null : roundOrder[pickInRound];
-  const onClockTeam  = onClockId ? getManagerTeam(onClockId) : '';
-
-  const pickedIds  = new Set(draft.picks.map(p => p.playerId));
-  const available  = state.players.filter(p => !pickedIds.has(p.id));
-
-  // Per-manager position counts from picks already made
-  const managerPosCounts = {};
-  draft.picks.forEach(pk => {
-    if (!managerPosCounts[pk.managerId]) managerPosCounts[pk.managerId] = { F:0, D:0, G:0 };
-    managerPosCounts[pk.managerId][posGroup(pk.position || '')]++;
-  });
-
-  const clockCounts = onClockId ? (managerPosCounts[onClockId] || { F:0, D:0, G:0 }) : { F:0, D:0, G:0 };
-
-  const posLimitFull = (grp) => clockCounts[grp] >= POSITION_LIMITS[grp];
-
-  const renderAvail = (q) => {
-    const list = q ? available.filter(p => p.name.toLowerCase().includes(q)) : available;
-    if (!list.length) return `<div class="text-dim text-sm" style="padding:12px">No players available</div>`;
-    return list.slice(0, 150).map(p => {
-      const grp = posGroup(p.position || '');
-      const full = !isDone && posLimitFull(grp);
-      return `
-      <div class="draft-player-row${full ? ' pos-full' : ''}">
-        <span class="draft-player-info">
-          ${p.headshot ? `<img src="${p.headshot}" class="draft-headshot" loading="lazy" onerror="this.style.display='none'">` : '<div class="draft-headshot-ph"></div>'}
-          <span class="draft-player-name">
-            ${p.name}
-            ${p.position ? `<span class="pos-badge pos-${p.position}">${p.position}</span>` : ''}
-            ${p.ovr ? ovrBadge(p.ovr) : ''}
-            ${p.plt ? pltBadge(p.plt) : ''}
-            ${p.number ? `<span class="text-dim text-xs">#${p.number}</span>` : ''}
-          </span>
-        </span>
-        ${isAdmin && !isDone
-          ? (full
-              ? `<span class="draft-full-label">${grp} FULL</span>`
-              : `<button class="btn btn-primary btn-sm pick-player-btn" data-pid="${p.id}" data-name="${p.name.replace(/"/g,'&quot;')}" data-pos="${p.position||''}">Pick</button>`)
-          : ''}
-      </div>`;
-    }).join('');
-  };
-
-  container.innerHTML = `
-    <div class="draft-layout">
-      <div>
-        ${!isDone ? `
-          <div class="card mb-16" style="border-color:var(--gold);background:rgba(200,168,78,.06)">
-            <div class="text-xs text-muted mb-6">ON THE CLOCK &#x2014; Round ${roundNum+1}, Pick ${pickInRound+1}</div>
-            <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
-              ${teamLogoLg(onClockTeam, 52)}
-              <div>
-                <div style="font-size:1.3rem;font-weight:800;color:var(--gold)">${managerName(onClockId)}</div>
-                <div style="margin-top:4px">${teamBadge(onClockTeam)}</div>
-              </div>
-            </div>
-            <div class="pos-counts mt-8">
-              <span class="pos-count${clockCounts.F >= POSITION_LIMITS.F ? ' pos-count-full' : ''}">F ${clockCounts.F}/${POSITION_LIMITS.F}</span>
-              <span class="pos-count${clockCounts.D >= POSITION_LIMITS.D ? ' pos-count-full' : ''}">D ${clockCounts.D}/${POSITION_LIMITS.D}</span>
-              <span class="pos-count${clockCounts.G >= POSITION_LIMITS.G ? ' pos-count-full' : ''}">G ${clockCounts.G}/${POSITION_LIMITS.G}</span>
-            </div>
-            ${isAdmin ? `<div style="margin-top:8px">
-              <button class="btn btn-ghost btn-sm" id="auto-pick-btn" style="font-size:.72rem">⚡ Auto Pick Once</button>
-            </div>` : ''}
-          </div>` : `
-          <div class="card mb-16" style="border-color:var(--success)">
-            <div style="font-size:1.1rem;font-weight:700;color:var(--success)">Draft Complete &#x2014; ${draft.picks.length} picks made</div>
-          </div>`}
-
-        <div class="text-xs text-muted mb-8">${draft.picks.length} of ${totalPicks} picks made</div>
-        <div class="table-wrap" style="max-height:480px;overflow-y:auto">
-          <table>
-            <thead><tr><th>#</th><th>Manager</th><th>Team</th><th>Player</th>${isAdmin ? '<th></th>' : ''}</tr></thead>
-            <tbody>
-              ${[...draft.picks].reverse().map((pick, revI) => {
-                const origIdx = draft.picks.length - 1 - revI;
-                return `<tr>
-                  <td class="num text-dim">${origIdx + 1}</td>
-                  <td style="font-weight:600">${managerName(pick.managerId)}</td>
-                  <td>${teamBadge(pick.teamCode)}</td>
-                  <td>${pick.playerName}</td>
-                  ${isAdmin ? `<td><button class="btn btn-ghost btn-xs edit-pick-btn" data-idx="${origIdx}" title="Edit pick" style="font-size:.7rem;padding:2px 6px">✎</button></td>` : ''}
-                </tr>`;
-              }).join('')}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="draft-sidebar">
-        ${isAdmin && !isDone ? `
-        <div class="card mb-12">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-            <span class="card-title" style="font-size:.78rem;margin:0">🤖 Auto-Draft Per Manager</span>
-            <div style="display:flex;gap:4px">
-              <button class="btn btn-xs btn-primary" id="auto-all-btn" style="font-size:.65rem;padding:2px 5px">All ON</button>
-              <button class="btn btn-xs btn-ghost" id="auto-none-btn" style="font-size:.65rem;padding:2px 5px">All OFF</button>
-            </div>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:4px">
-            ${draft.order.map(mid => {
-              const isAuto = (draft.autoManagers||[]).includes(mid);
-              const tc = getManagerTeam(mid);
-              return `<div style="display:flex;align-items:center;justify-content:space-between;padding:3px 0">
-                <span style="font-size:.78rem;${mid === onClockId ? 'font-weight:700;color:var(--gold)' : ''}">${teamBadge(tc)} ${managerName(mid)}</span>
-                <button class="btn btn-xs ${isAuto ? 'btn-primary' : 'btn-ghost'} auto-mgr-toggle" data-mid="${mid}" style="font-size:.68rem;padding:2px 6px">${isAuto ? '🤖 ON' : 'OFF'}</button>
-              </div>`;
-            }).join('')}
-          </div>
-        </div>` : ''}
-        <div class="card">
-          <div class="card-title">Available (${available.length})</div>
-          <input type="text" id="draft-search" placeholder="Search players&#x2026;" style="width:100%;margin-bottom:8px">
-          <div id="draft-avail-list" class="available-list">${renderAvail('')}</div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  $('draft-search')?.addEventListener('input', e => {
-    $('draft-avail-list').innerHTML = renderAvail(e.target.value.toLowerCase());
-    attachPickBtns();
-  });
-
-  function attachPickBtns() {
-    container.querySelectorAll('.pick-player-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        if (!isAdmin || isDone) return;
-        const playerId   = +btn.dataset.pid;
-        const playerName = btn.dataset.name;
-        const position   = btn.dataset.pos || '';
-        state.liveDraft.picks.push({
-          round: roundNum + 1, pick: currentIdx + 1,
-          managerId: onClockId, teamCode: onClockTeam,
-          playerId, playerName, position,
-        });
-        const player = state.players.find(p => p.id === playerId);
-        if (player) player.teamCode = onClockTeam;
-        saveState();
-        renderLiveDraftTab();
-      });
-    });
-  }
-  attachPickBtns();
-  $('auto-pick-btn')?.addEventListener('click', autoDraftPick);
-
-  // Per-manager auto-draft toggles
-  container.querySelectorAll('.auto-mgr-toggle').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const mid = btn.dataset.mid;
-      if (!state.liveDraft.autoManagers) state.liveDraft.autoManagers = [];
-      const idx = state.liveDraft.autoManagers.indexOf(mid);
-      if (idx === -1) state.liveDraft.autoManagers.push(mid);
-      else state.liveDraft.autoManagers.splice(idx, 1);
-      saveState();
-      renderLiveDraftTab();
-    });
-  });
-
-  $('auto-all-btn')?.addEventListener('click', () => {
-    state.liveDraft.autoManagers = [...draft.order];
-    saveState();
-    renderLiveDraftTab();
-  });
-  $('auto-none-btn')?.addEventListener('click', () => {
-    state.liveDraft.autoManagers = [];
-    saveState();
-    renderLiveDraftTab();
-  });
-
-  // Attach edit-pick buttons
-  container.querySelectorAll('.edit-pick-btn').forEach(btn => {
-    btn.addEventListener('click', () => showEditPick(+btn.dataset.idx));
-  });
-
-  // Auto-draft loop: fire if the on-clock manager has auto-draft enabled
-  if (isAdmin && !isDone && (draft.autoManagers||[]).includes(onClockId)) {
-    setTimeout(() => {
-      // Re-compute who is on the clock now in case something changed
-      const d = state.liveDraft;
-      if (!d || d.picks.length >= totalPicks) return;
-      const ci   = d.picks.length;
-      const rn   = Math.floor(ci / d.order.length);
-      const ord  = rn % 2 === 0 ? d.order : [...d.order].reverse();
-      const curId = ord[ci % d.order.length];
-      if ((d.autoManagers||[]).includes(curId)) autoDraftPick();
-    }, 700);
+  if (window.DraftModule?.renderLiveDraftTab) {
+    window.DraftModule.renderLiveDraftTab(getDraftModuleContext());
   }
 }
 
 function showEditPick(pickIdx) {
-  const draft = state.liveDraft;
-  if (!draft || pickIdx < 0 || pickIdx >= draft.picks.length) return;
-  const pick = draft.picks[pickIdx];
-
-  const otherPickedIds = new Set(draft.picks.filter((_, i) => i !== pickIdx).map(p => p.playerId));
-  const available = state.players.filter(p => !otherPickedIds.has(p.id));
-
-  function renderList(q) {
-    const filtered = q ? available.filter(p => p.name.toLowerCase().includes(q)) : available;
-    return filtered.slice(0, 120).map(p => `
-      <div class="draft-player-row">
-        <span class="draft-player-info">
-          ${p.headshot ? `<img src="${p.headshot}" class="draft-headshot" loading="lazy" onerror="this.style.display='none'">` : '<div class="draft-headshot-ph"></div>'}
-          <span class="draft-player-name">
-            ${p.name}
-            ${p.position ? `<span class="pos-badge pos-${p.position}">${p.position}</span>` : ''}
-            ${p.ovr ? ovrBadge(p.ovr) : ''}
-          </span>
-        </span>
-        <button class="btn btn-primary btn-sm ep-select-btn" data-pid="${p.id}" data-name="${p.name.replace(/"/g,'&quot;')}" data-pos="${p.position||''}">Select</button>
-      </div>
-    `).join('');
+  if (window.DraftModule?.showEditPick) {
+    window.DraftModule.showEditPick(getDraftModuleContext(), pickIdx);
   }
-
-  function attachSelectBtns() {
-    $('ep-list')?.querySelectorAll('.ep-select-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const oldPlayer = state.players.find(p => p.id === pick.playerId);
-        const newPlayer = state.players.find(p => p.id === +btn.dataset.pid);
-        if (!newPlayer) return;
-        if (oldPlayer && oldPlayer.teamCode === pick.teamCode) oldPlayer.teamCode = '';
-        pick.playerId = newPlayer.id;
-        pick.playerName = newPlayer.name;
-        pick.position = btn.dataset.pos || '';
-        newPlayer.teamCode = pick.teamCode;
-        saveState();
-        hideModal();
-        toast(`Pick #${pickIdx + 1} updated → ${newPlayer.name}`, 'success');
-        renderLiveDraftTab();
-      });
-    });
-  }
-
-  showModal(`Edit Pick #${pickIdx + 1} — ${managerName(pick.managerId)}`, `
-    <div class="text-xs text-muted mb-8">Current: <strong>${pick.playerName}</strong></div>
-    <input type="text" id="ep-search" placeholder="Search players…" style="width:100%;margin-bottom:8px">
-    <div id="ep-list" style="max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
-      ${renderList('')}
-    </div>
-  `, null);
-
-  $('ep-search')?.addEventListener('input', e => {
-    $('ep-list').innerHTML = renderList(e.target.value.toLowerCase());
-    attachSelectBtns();
-  });
-  attachSelectBtns();
 }
 
 function autoDraftPick() {
-  const draft = state.liveDraft;
-  if (!draft || !draft.active) return;
-  const currentIdx  = draft.picks.length;
-  const totalPicks  = draft.order.length * draft.rounds;
-  if (currentIdx >= totalPicks) return;
-
-  const roundNum    = Math.floor(currentIdx / draft.order.length);
-  const pickInRound = currentIdx % draft.order.length;
-  const roundOrder  = roundNum % 2 === 0 ? draft.order : [...draft.order].reverse();
-  const onClockId   = roundOrder[pickInRound];
-  const onClockTeam = getManagerTeam(onClockId);
-
-  // Count existing picks by group for on-clock manager
-  const counts = { F: 0, D: 0, G: 0 };
-  draft.picks.filter(p => p.managerId === onClockId).forEach(p => counts[posGroup(p.position || '')]++);
-
-  const totalPerMgr = POSITION_LIMITS.F + POSITION_LIMITS.D + POSITION_LIMITS.G;
-  const currentCount = counts.F + counts.D + counts.G;
-  const remaining   = totalPerMgr - currentCount;
-  const gNeeded     = Math.max(0, POSITION_LIMITS.G - counts.G);
-  const dNeeded     = Math.max(0, POSITION_LIMITS.D - counts.D);
-
-  // Force positional pick only when roster slots mandate it
-  // (e.g. last 2 picks must be goalies, or last 2+7 must be D/G)
-  const mustPickGoalie  = remaining <= gNeeded && gNeeded > 0;
-  const mustPickDefense = !mustPickGoalie && remaining <= (dNeeded + gNeeded) && dNeeded > 0;
-
-  const pickedIds = new Set(draft.picks.map(p => p.playerId));
-
-  let pick;
-  if (mustPickGoalie) {
-    pick = state.players
-      .filter(p => !pickedIds.has(p.id) && posGroup(p.position || '') === 'G')
-      .sort((a, b) => (b.ovr || 0) - (a.ovr || 0))[0];
-  } else if (mustPickDefense) {
-    pick = state.players
-      .filter(p => !pickedIds.has(p.id) && posGroup(p.position || '') === 'D')
-      .sort((a, b) => (b.ovr || 0) - (a.ovr || 0))[0];
-  } else {
-    // Default: pick highest OVR skater from positions still open (forwards or defence)
-    const openGroups = ['F', 'D'].filter(g => counts[g] < POSITION_LIMITS[g]);
-    pick = state.players
-      .filter(p => !pickedIds.has(p.id) && openGroups.includes(posGroup(p.position || '')))
-      .sort((a, b) => (b.ovr || 0) - (a.ovr || 0))[0];
+  if (window.DraftModule?.autoDraftPick) {
+    window.DraftModule.autoDraftPick(getDraftModuleContext());
   }
-
-  // Fallback: any undrafted player (should be rare)
-  if (!pick) {
-    pick = state.players
-      .filter(p => !pickedIds.has(p.id))
-      .sort((a, b) => (b.ovr || 0) - (a.ovr || 0))[0];
-  }
-
-  if (!pick) { toast('No players available to auto-pick', 'error'); return; }
-
-  draft.picks.push({
-    round: roundNum + 1, pick: currentIdx + 1,
-    managerId: onClockId, teamCode: onClockTeam,
-    playerId: pick.id, playerName: pick.name, position: pick.position || '',
-  });
-  pick.teamCode = onClockTeam;
-  saveState();
-  toast(`Auto-picked: ${pick.name} (${pick.ovr || '?'} OVR) → ${managerName(onClockId)}`, 'success');
-  renderLiveDraftTab();
 }
 
 function showSetupLiveDraft() {
-  if (!state.managers.length) { toast('Add managers in Settings first', 'error'); return; }
-  if (!state.players.length) { toast('Fetch NHL rosters in Settings first', 'error'); return; }
-
-  showModal('Setup Live Draft', `
-    <div style="background:rgba(200,16,46,.08);border:1px solid rgba(200,16,46,.3);border-radius:6px;padding:14px 16px;margin-bottom:16px">
-      <label style="font-size:.7rem;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted);display:block;margin-bottom:6px">Number of Rounds</label>
-      <input type="number" id="ld-rounds" value="${state.liveDraft?.rounds || 1}" min="1" max="30" style="font-size:1.4rem;font-weight:800;width:80px;text-align:center">
-      <span class="text-xs text-muted" style="margin-left:10px">rounds &times; ${state.managers.length} managers = ${state.managers.length * (state.liveDraft?.rounds || 1)} total picks</span>
-    </div>
-    <div class="form-row">
-      <label>Draft order (snake &#x2014; set pick position for Round 1)</label>
-      <p class="text-xs text-dim mb-8">Lower number = earlier pick</p>
-      ${state.managers.map((m, i) => `
-        <div class="flex gap-8 items-center mb-8">
-          <span style="color:${m.color};font-weight:700;min-width:80px">${m.name}</span>
-          <span class="text-xs text-muted">${teamBadge(getManagerTeam(m.id))}</span>
-          <input type="number" id="ld-order-${m.id}" value="${i+1}" min="1" max="${state.managers.length}" style="width:60px;margin-left:auto">
-        </div>`).join('')}
-    </div>
-    <button id="modal-ok" class="btn btn-primary btn-block mt-12">Start Draft</button>
-  `, () => {
-    const rounds  = Math.max(1, +$('ld-rounds').value || 1);
-    const ordered = state.managers
-      .map(m => ({ id: m.id, pos: +$(`ld-order-${m.id}`)?.value || 99 }))
-      .sort((a, b) => a.pos - b.pos)
-      .map(x => x.id);
-
-    const prevAutoManagers = state.liveDraft?.autoManagers || [];
-    state.liveDraft = { active: true, rounds, order: ordered, picks: [], autoManagers: prevAutoManagers };
-    saveState();
-    hideModal();
-    state.draftTab = 'live';
-    renderDraft();
-    toast('Draft started!', 'success');
-  });
+  if (window.DraftModule?.showSetupLiveDraft) {
+    window.DraftModule.showSetupLiveDraft(getDraftModuleContext());
+  }
 }
 
 function renderImportedDraftTab() {
@@ -2115,7 +1772,7 @@ function showEnterScore(g) {
   `, () => {
     const hs = +$('score-home').value, as_ = +$('score-away').value;
     if (hs === as_) { toast('Scores cannot be tied', 'error'); return; }
-    g.homeScore = hs; g.awayScore = as_; g.ot = $('score-ot').checked; g.played = true;
+    g.homeScore = hs; g.awayScore = as_; g.ot = $('score-ot').checked; g.played = true; g.postedAt = new Date().toISOString();
     saveState();
     hideModal();
     renderSchedule();
@@ -2194,7 +1851,74 @@ function showGenerateSchedule() {
 }
 
 // ================================================================
-// 12. STANDINGS
+// 12. SCORES
+// ================================================================
+let _scoresFilter = { week: 'all' };
+
+function renderScores() {
+  const el_ = $('section-scores');
+  const played = state.games
+    .filter(g => g.played && !g.playoff)
+    .sort((a, b) => (b.postedAt || b.playedAt || b.date || '').localeCompare(a.postedAt || a.playedAt || a.date || ''));
+
+  const weeks = [...new Set(played.map(g => g.week).filter(Boolean))].sort((a, b) => a - b);
+
+  if (_scoresFilter.week !== 'all' && !weeks.includes(_scoresFilter.week)) {
+    _scoresFilter.week = 'all';
+  }
+
+  const visible = _scoresFilter.week === 'all' ? played : played.filter(g => g.week === _scoresFilter.week);
+
+  el_.innerHTML = `
+    <div class="section-header">
+      <h2 class="section-title">Scores</h2>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;align-items:center">
+      <button class="btn btn-xs ${_scoresFilter.week === 'all' ? 'btn-primary' : 'btn-ghost'} scores-wk-btn" data-wk="all">All</button>
+      ${weeks.map(w => `<button class="btn btn-xs ${_scoresFilter.week === w ? 'btn-primary' : 'btn-ghost'} scores-wk-btn" data-wk="${w}">Wk ${w}</button>`).join('')}
+    </div>
+    <div class="panel" style="padding:0">
+      ${visible.length ? visible.map(g => {
+        const homeWin = +g.homeScore > +g.awayScore;
+        return `
+        <div class="sb-game">
+          <div class="sb-team ${homeWin ? 'sb-winner' : 'sb-loser'}">
+            <div class="sb-logo">${teamLogoLg(g.homeTeam, 52)}</div>
+            <div class="sb-info">
+              <div class="sb-code">${g.homeTeam}</div>
+              <div class="sb-mgr">${teamOwnerName(g.homeTeam)}</div>
+            </div>
+            <div class="sb-score ${homeWin ? 'sb-score-win' : ''}">${g.homeScore}</div>
+          </div>
+          <div class="sb-sep">
+            <span class="sb-ot">${g.ot ? 'OT' : ''}</span>
+            <span class="sb-vs">Final</span>
+            ${g.postedAt ? `<span class="sb-posted">${fmtDateTime(g.postedAt)}</span>` : (g.week ? `<span class="sb-posted">Wk ${g.week}</span>` : '')}
+          </div>
+          <div class="sb-team ${!homeWin ? 'sb-winner' : 'sb-loser'}">
+            <div class="sb-score ${!homeWin ? 'sb-score-win' : ''}">${g.awayScore}</div>
+            <div class="sb-info" style="text-align:right">
+              <div class="sb-code">${g.awayTeam}</div>
+              <div class="sb-mgr">${teamOwnerName(g.awayTeam)}</div>
+            </div>
+            <div class="sb-logo">${teamLogoLg(g.awayTeam, 52)}</div>
+          </div>
+        </div>`;
+      }).join('') : '<div class="empty-state"><span class="empty-icon">🏒</span>No scores posted yet</div>'}
+    </div>
+  `;
+
+  el_.querySelectorAll('.scores-wk-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const wk = btn.dataset.wk;
+      _scoresFilter.week = wk === 'all' ? 'all' : +wk;
+      renderScores();
+    });
+  });
+}
+
+// ================================================================
+// 13. STANDINGS
 // ================================================================
 function renderStandings() {
   const el_ = $('section-standings');
@@ -2547,23 +2271,37 @@ document.addEventListener('click', e => {
     const fromNames = [...give, ...recv].map(n => n).join(', ') || 'no players';
     if (!confirm(`Reverse this trade?\n\n${t.fromTeam} → ${t.toTeam}\nSent: ${give.join(', ') || '—'}\nReceived: ${recv.join(', ') || '—'}\n\nThis will move all players back to their original teams.`)) return;
 
-    // Move players back — reverse the original moves
+    // Step 1: manually move players back to their original sides
     let moved = 0;
-    give.forEach(name => {
-      const p = state.players.find(x => x.name === name);
-      if (p) { p.teamCode = t.fromTeam; moved++; }
-    });
-    recv.forEach(name => {
-      const p = state.players.find(x => x.name === name);
-      if (p) { p.teamCode = t.toTeam; moved++; }
-    });
-
+    give.forEach(name => { const p = state.players.find(x => x.name === name); if (p) { p.teamCode = t.fromTeam; moved++; } });
+    recv.forEach(name => { const p = state.players.find(x => x.name === name); if (p) { p.teamCode = t.toTeam; moved++; } });
+    // Step 2: remove this trade, then replay remaining trades on top
     state.trades = state.trades.filter(x => x.id !== tid);
+    applyTradeHistory();
     saveState();
     renderTrades();
     toast(`Trade reversed — ${moved} player${moved !== 1 ? 's' : ''} moved back`, 'success');
   }
 });
+
+function applyTradeHistory() {
+  // Replay all trades in chronological order to keep player teamCodes consistent.
+  // Called after recording a trade AND after any NHL API roster refresh.
+  const toList = v => Array.isArray(v) ? v : (v ? [v] : []);
+  state.trades
+    .slice()
+    .sort((a, b) => (a.date || '').localeCompare(b.date || ''))
+    .forEach(t => {
+      toList(t.playersSent).forEach(name => {
+        const p = state.players.find(x => x.name === name);
+        if (p) p.teamCode = t.toTeam;
+      });
+      toList(t.playersReceived).forEach(name => {
+        const p = state.players.find(x => x.name === name);
+        if (p) p.teamCode = t.fromTeam;
+      });
+    });
+}
 
 function showNewTrade() {
   const managedTeams = NHL_TEAMS.filter(t => state.teamOwners[t.code]);
@@ -2606,9 +2344,7 @@ function showNewTrade() {
       fromTeam, toTeam, playersSent: give, playersReceived: recv,
       notes: $('trade-notes').value,
     });
-    // Update player team assignments
-    give.forEach(name => { const p = state.players.find(x => x.name === name); if (p) p.teamCode = toTeam; });
-    recv.forEach(name => { const p = state.players.find(x => x.name === name); if (p) p.teamCode = fromTeam; });
+    applyTradeHistory();
     saveState();
     hideModal();
     renderTrades();
@@ -2825,16 +2561,18 @@ async function fetchNHLRosters({ silent = false } = {}) {
   }));
 
   if (allPlayers.length) {
-    // Preserve existing OVR/PLT and draft team assignment when refreshing
+    // Preserve existing OVR/PLT and team assignment when refreshing
     allPlayers.forEach(p => {
       const existing = state.players.find(e => e.id === p.id);
       if (existing) {
         p.ovr = existing.ovr;
         p.plt = existing.plt;
-        if (existing.teamCode) p.teamCode = existing.teamCode; // keep draft assignment
+        if (existing.teamCode) p.teamCode = existing.teamCode;
       }
     });
     state.players = allPlayers;
+    // Re-apply trade history so trades always win over API data
+    applyTradeHistory();
     saveState();
     if (!silent) toast(`${allPlayers.length} players loaded`, 'success');
     if (currentSection === 'settings') renderSettings();
@@ -2950,6 +2688,24 @@ function viewSeasonModal(seasonId) {
 function renderSettings() {
   const el_ = $('section-settings');
   const sysData = normalizeSysDataFile(state.sysDataFile);
+  const assignedTeams = NHL_TEAMS
+    .filter(t => t.code !== 'UTI')
+    .map(t => {
+      const ownerId = state.teamOwners[t.code] || '';
+      const coOwnerId = state.teamCoOwners[t.code] || '';
+      return {
+        code: t.code,
+        ownerId,
+        coOwnerId,
+        ownerName: ownerId ? managerName(ownerId) : 'Unassigned',
+        coOwnerName: coOwnerId ? managerName(coOwnerId) : '',
+      };
+    });
+  const managerTeamCounts = state.managers.map((m) => ({
+    ...m,
+    primaryCount: assignedTeams.filter((team) => team.ownerId === m.id).length,
+    totalCount: assignedTeams.filter((team) => team.ownerId === m.id || team.coOwnerId === m.id).length,
+  }));
 
   el_.innerHTML = `
     <div class="page-header"><h2>Settings</h2></div>
@@ -2966,11 +2722,15 @@ function renderSettings() {
 
       <div class="card">
         <div class="card-title">Managers</div>
+        <p class="text-xs text-muted mb-12">Manage owners here, then assign teams below. Counts update automatically so you can spot imbalances faster.</p>
         <ul class="manager-list" id="manager-list">
-          ${state.managers.map(m => `
+          ${managerTeamCounts.map(m => `
             <li class="manager-item">
               <span class="manager-dot" style="background:${m.color}"></span>
-              <span class="manager-name">${m.name}</span>
+              <div class="manager-meta">
+                <span class="manager-name">${m.name}</span>
+                <span class="manager-subline">${m.primaryCount} primary · ${m.totalCount} total teams</span>
+              </div>
               ${isAdmin ? `<button class="btn btn-ghost btn-sm del-manager-btn" data-mid="${m.id}">✕</button>` : ''}
             </li>`).join('') || '<li class="text-dim text-sm" style="padding:8px 0">No managers added</li>'}
         </ul>
@@ -2983,18 +2743,21 @@ function renderSettings() {
 
       <div class="card">
         <div class="card-title">Team Assignments</div>
-        <p class="text-xs text-muted mb-12">Assign NHL teams to managers. Also set automatically through the Draft.</p>
+        <p class="text-xs text-muted mb-12">Assign NHL teams to managers. Primary owner and optional co-manager stay visible together so the full league map is easier to scan.</p>
         <div class="team-assign-grid">
-          ${NHL_TEAMS.filter(t => t.code !== 'UTI').map(t => `
+          ${assignedTeams.map((team) => `
             <div class="team-assign-item">
-              <label>${t.code}</label>
-              <select class="team-owner-select" data-code="${t.code}" ${isAdmin?'':'disabled'}>
+              <div class="team-assign-header">
+                <label>${team.code}</label>
+                <span class="team-assign-summary">${team.ownerName}${team.coOwnerName ? ` + ${team.coOwnerName}` : ''}</span>
+              </div>
+              <select class="team-owner-select" data-code="${team.code}" ${isAdmin?'':'disabled'}>
                 <option value="">— None —</option>
-                ${state.managers.map(m => `<option value="${m.id}" ${state.teamOwners[t.code]===m.id?'selected':''}>${m.name}</option>`).join('')}
+                ${state.managers.map(m => `<option value="${m.id}" ${team.ownerId===m.id?'selected':''}>${m.name}</option>`).join('')}
               </select>
-              <select class="team-coowner-select" data-code="${t.code}" ${isAdmin?'':'disabled'} title="Co-Manager (optional)">
+              <select class="team-coowner-select" data-code="${team.code}" ${isAdmin?'':'disabled'} title="Co-Manager (optional)">
                 <option value="">— Co-Mgr —</option>
-                ${state.managers.map(m => `<option value="${m.id}" ${state.teamCoOwners[t.code]===m.id?'selected':''}>${m.name}</option>`).join('')}
+                ${state.managers.map(m => `<option value="${m.id}" ${team.coOwnerId===m.id?'selected':''}>${m.name}</option>`).join('')}
               </select>
             </div>`).join('')}
         </div>
@@ -3041,14 +2804,6 @@ function renderSettings() {
         </div>
 
         <div class="card">
-          <div class="card-title">Import Player Ratings (OVR / PLT)</div>
-          <p class="text-xs text-muted mb-12">Paste player data from in-game screenshots. One player per line — name, OVR, PLT (tab, comma, or 2+ spaces between columns). Example: <span class="text-dim">M. BOLDY&nbsp;&nbsp;91&nbsp;&nbsp;PLY</span></p>
-          <textarea id="ratings-import-txt" placeholder="M. BOLDY&#9;91&#9;PLY&#10;A. OVECHKIN&#9;88&#9;PWF&#10;N. HISCHIER&#9;88&#9;TWF" style="width:100%;height:130px;font-size:.78rem;font-family:monospace"></textarea>
-          <button class="btn btn-primary mt-8" id="import-ratings-btn">Import Ratings</button>
-          <div id="ratings-import-status" class="text-sm text-muted mt-8"></div>
-        </div>
-
-        <div class="card">
           <div class="card-title">NHL Roster Data</div>
           <div class="flex items-center gap-12" style="margin-bottom:10px">
             <span class="text-sm ${state.players.length ? 'text-success' : 'text-muted'}">
@@ -3078,12 +2833,6 @@ function renderSettings() {
             <button class="btn btn-ghost btn-sm" id="pf-add-btn">+ Add Round</button>
             <button class="btn btn-primary btn-sm" id="pf-save-btn">Save Format</button>
           </div>
-        </div>
-
-        <div class="card">
-          <div class="card-title">Simulate Full Season</div>
-          <p class="text-xs text-muted mb-12">Generate a complete simulated season: snake draft, 10-week schedule (3 games/week), and playoffs for the top 8 teams. Replaces all existing data.</p>
-          <button class="btn btn-secondary" id="simulate-season-btn">Simulate Full Season</button>
         </div>
 
         ${isAdmin ? `
@@ -3153,6 +2902,19 @@ function renderSettings() {
             <button class="btn btn-primary mt-8" id="import-confirm-btn">Import</button>
           </div>
           <div class="divider"></div>
+          <details class="advanced-settings-card mb-12">
+            <summary class="advanced-settings-summary">Advanced Settings</summary>
+            <div class="advanced-settings-body">
+              <p class="text-xs text-muted mb-12">Danger zone actions for testing or full-league resets. Keep this away from normal day-to-day admin work.</p>
+              <div class="advanced-setting-item">
+                <div>
+                  <div style="font-weight:700">Simulate Full Season</div>
+                  <div class="text-xs text-muted mt-4">Generates a complete simulated season: snake draft, 10-week schedule, and playoffs. Replaces existing draft, schedule, and playoff data.</div>
+                </div>
+                <button class="btn btn-danger" id="simulate-season-btn">Simulate Full Season</button>
+              </div>
+            </div>
+          </details>
           <div class="text-xs text-dim">Admin logout: <button class="btn btn-ghost btn-sm" id="admin-logout-btn">Logout</button></div>
         </div>` : ''}
 
@@ -3206,11 +2968,31 @@ function renderSettings() {
   $('save-league-btn')?.addEventListener('click', () => {
     state.league.name = $('set-league-name').value;
     state.league.season = $('set-season').value;
-    const newPw = $('set-admin-pw')?.value;
-    if (newPw) state.league.adminHash = simpleHash(newPw);
-    saveState();
-    $('league-title').textContent = state.league.name;
-    toast('League settings saved', 'success');
+    const newPw = $('set-admin-pw')?.value?.trim() || '';
+    const saveLeague = async () => {
+      saveState();
+      $('league-title').textContent = state.league.name;
+      renderSettings();
+      toast('League settings saved', 'success');
+    };
+    if (!newPw) {
+      saveLeague();
+      return;
+    }
+    _apiFetch('/api/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({ password: newPw }),
+    })
+      .then(async r => {
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok || !body.ok) {
+          if (r.status === 401) clearAdminSession({ rerender: true });
+          toast(body.error || 'Password update failed', 'error');
+          return;
+        }
+        await saveLeague();
+      })
+      .catch(() => toast('Password update failed', 'error'));
   });
 
   $('add-manager-btn')?.addEventListener('click', () => {
@@ -3262,14 +3044,6 @@ function renderSettings() {
     toast('Rules reset to default', 'success');
   });
 
-  $('import-ratings-btn')?.addEventListener('click', () => {
-    const text = $('ratings-import-txt').value.trim();
-    if (!text) return;
-    const { matched, skipped } = importRatings(text);
-    const status = $('ratings-import-status');
-    status.innerHTML = `<span class="text-success">✓ ${matched} players updated</span>${skipped ? `  <span class="text-dim">(${skipped} not matched)</span>` : ''}`;
-    if (matched) renderSection(currentSection);
-  });
   $('upload-sysdata-btn')?.addEventListener('click', () => $('sysdata-file-input')?.click());
   $('sysdata-file-input')?.addEventListener('change', async e => {
     const file = e.target.files[0];
@@ -3459,9 +3233,8 @@ function renderSettings() {
   $('reset-btn')?.addEventListener('click', () => {
     if (confirm('Reset ALL league data? This cannot be undone.')) {
       state = defaultState();
-      isAdmin = false;
       saveState();
-      updateAdminUI();
+      clearAdminSession();
       renderSection('dashboard');
       navigate('dashboard');
       toast('League reset', 'info');
@@ -3469,10 +3242,7 @@ function renderSettings() {
   });
 
   $('admin-logout-btn')?.addEventListener('click', () => {
-    isAdmin = false;
-    _adminToken = '';
-    localStorage.removeItem('nhl-admin-token');
-    updateAdminUI();
+    clearAdminSession();
     renderSettings();
     toast('Logged out', 'info');
   });
@@ -3507,14 +3277,6 @@ function renderSettings() {
 // ================================================================
 // 16. ADMIN LOGIN (HEADER BUTTON)
 // ================================================================
-function simpleHash(s) {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = Math.imul(31, h) + s.charCodeAt(i) | 0;
-  }
-  return Math.abs(h).toString(36);
-}
-
 async function _fetchAdminToken(pw) {
   try {
     const r = await fetch('/api/auth', {
@@ -3525,9 +3287,18 @@ async function _fetchAdminToken(pw) {
     if (r.ok) {
       const { token } = await r.json();
       _adminToken = token;
-      localStorage.setItem('nhl-admin-token', token);
+      sessionStorage.setItem('nhl-admin-token', token);
+      isAdmin = true;
+      updateAdminUI();
+      return { ok: true };
     }
-  } catch {}
+    const body = await r.json().catch(() => ({}));
+    clearAdminSession();
+    return { ok: false, error: body.error || 'Login failed', status: r.status };
+  } catch {
+    clearAdminSession();
+    return { ok: false, error: 'Login failed' };
+  }
 }
 
 function updateAdminUI() {
@@ -3537,11 +3308,7 @@ function updateAdminUI() {
 
 function handleAdminToggle() {
   if (isAdmin) {
-    isAdmin = false;
-    _adminToken = '';
-    localStorage.removeItem('nhl-admin-token');
-    updateAdminUI();
-    renderSection(currentSection);
+    clearAdminSession({ rerender: true });
     toast('Logged out', 'info');
     return;
   }
@@ -3549,23 +3316,19 @@ function handleAdminToggle() {
     <div class="form-row">
       <label>Admin Password</label>
       <input type="password" id="login-pw" placeholder="Enter password" autofocus>
-      <p class="text-xs text-dim mt-4">First time? Any password will work (set it in Settings).</p>
+      <p class="text-xs text-dim mt-4">Admin access is granted only after the server verifies your password.</p>
     </div>
     <button id="modal-ok" class="btn btn-primary btn-block mt-12">Login</button>
-  `, () => {
+  `, async () => {
     const pw = $('login-pw').value;
     if (!pw) return;
-    if (!state.league.adminHash || simpleHash(pw) === state.league.adminHash) {
-      if (!state.league.adminHash) state.league.adminHash = simpleHash(pw);
-      isAdmin = true;
-      saveState();
-      _fetchAdminToken(pw);  // get JWT for API calls (fire-and-forget)
-      updateAdminUI();
+    const result = await _fetchAdminToken(pw);
+    if (result.ok) {
       hideModal();
       renderSection(currentSection);
       toast('Admin access granted', 'success');
     } else {
-      toast('Wrong password', 'error');
+      toast(result.error || 'Wrong password', 'error');
     }
   });
   // Allow Enter key in password field
@@ -3579,37 +3342,26 @@ function handleAdminToggle() {
 // ================================================================
 // 17. INIT
 // ================================================================
-async function autoLoadRatings() {
-  const files = ['players_ovr_plt_all.txt', 'players_ovr_plt_goalies.txt'];
-  let totalMatched = 0;
-  for (const file of files) {
-    try {
-      const text = await fetch(`${file}?v=1`).then(r => {
-        if (!r.ok) throw new Error('not found');
-        return r.text();
-      });
-      const { matched } = importRatings(text);
-      totalMatched += matched;
-    } catch { /* file not available — no-op */ }
-  }
-  if (totalMatched) {
-    saveState();
-    if (['players','teams','draft'].includes(currentSection)) renderSection(currentSection);
-  }
-}
-
 async function init() {
   // Load state from API (or localStorage fallback) before rendering anything
   state = await loadState();
 
-  // Restore admin session if token exists in localStorage
-  if (_adminToken) {
-    isAdmin = true;
-  }
+  await verifyAdminSession();
 
   // Navigation
   document.querySelectorAll('.nav-btn').forEach(btn => {
-    btn.addEventListener('click', () => navigate(btn.dataset.section));
+    btn.addEventListener('click', () => {
+      navigate(btn.dataset.section);
+      // Close hamburger menu after picking a section on mobile
+      $('main-nav').classList.remove('nav-open');
+      $('hamburger-btn').classList.remove('open');
+    });
+  });
+
+  // Hamburger menu toggle
+  $('hamburger-btn').addEventListener('click', () => {
+    $('main-nav').classList.toggle('nav-open');
+    $('hamburger-btn').classList.toggle('open');
   });
 
   // Modal close
