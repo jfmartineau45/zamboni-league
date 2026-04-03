@@ -40,3 +40,7 @@ Thumbs.db
 
 # Playwright browser cache
 playwright-chromium/
+
+# Player rating files (keep local only)
+players_ovr_plt_all.txt
+players_ovr_plt_goalies.txt
