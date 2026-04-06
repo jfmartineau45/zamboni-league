@@ -82,3 +82,20 @@ async def get_discord_config() -> dict:
     """Return discordConfig from league state, or empty dict if not set."""
     state = await get_state()
     return state.get('discordConfig') or {}
+
+
+async def get_zamboni_player(gamertag: str) -> dict:
+    """Fetch a manager's Zamboni profile + full game history via the server proxy.
+    Returns { profile, history: { vs: [...], so: [...] }, version } or {}."""
+    status, data = await api_get(f'/api/zamboni/player/{gamertag}')
+    if status == 200 and isinstance(data, dict):
+        return data
+    return {}
+
+
+async def get_zamboni_game_report(game_id: int) -> dict:
+    """Fetch detailed per-game report (shots, hits, TOA, etc.) via server proxy."""
+    status, data = await api_get(f'/api/zamboni/game/{game_id}')
+    if status == 200 and isinstance(data, dict):
+        return data
+    return {}

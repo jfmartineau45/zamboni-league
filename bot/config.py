@@ -1,14 +1,31 @@
 """
 config.py — Load environment variables from .env (or system env)
+
+To run the dev bot against the test server, set BOT_ENV=dev before launching:
+    BOT_ENV=dev python -m bot.bot          (Mac/Linux)
+    set BOT_ENV=dev && python -m bot.bot   (Windows cmd)
+    $env:BOT_ENV="dev"; python -m bot.bot  (Windows PowerShell)
+
+This loads bot/.env.dev instead of bot/.env, keeping dev and prod completely
+separate (different tokens, different guild, points to localhost:3001).
 """
 import os
 from pathlib import Path
 
-# Load .env from bot/ directory if present
-_env_path = Path(__file__).parent / '.env'
+# BOT_ENV=dev → loads .env.dev; anything else → loads .env
+_bot_env   = os.environ.get('BOT_ENV', '').strip()
+_env_file  = f'.env.{_bot_env}' if _bot_env else '.env'
+_env_path  = Path(__file__).parent / _env_file
 if _env_path.exists():
     from dotenv import load_dotenv
     load_dotenv(_env_path)
+elif _bot_env:
+    import sys
+    print(f'[config] WARNING: BOT_ENV={_bot_env!r} but {_env_path} not found — falling back to .env', file=sys.stderr)
+    _fallback = Path(__file__).parent / '.env'
+    if _fallback.exists():
+        from dotenv import load_dotenv
+        load_dotenv(_fallback)
 
 
 def _int(key: str, default: int = 0) -> int:

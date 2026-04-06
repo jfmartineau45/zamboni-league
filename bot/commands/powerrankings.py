@@ -140,15 +140,27 @@ async def _generate_comments(ranked, state):
             move = '—'
         lines.append(
             f"#{r['prRank']} ({move}) {r['code']} — mgr: {mgr} | "
-            f"{r['w']}-{r['l']}-{r['otl']} {r['pts']}pts | L5: {l5['w']}-{l5['l']}-{l5['ot']}"
+            f"Season: {r['w']}-{r['l']}-{r['otl']} ({r['pts']}pts, {r['gp']}GP) | "
+            f"GF: {r['gf']} GA: {r['ga']} DIFF: {r['gf']-r['ga']:+d} | "
+            f"L5: {l5['w']}-{l5['l']}-{l5['ot']}"
         )
 
     prompt = (
-        "You are writing weekly power rankings for a private NHL Legacy (PS3/Xbox 360) video game league. "
-        "Write exactly one punchy sentence of commentary per team. "
-        "Reference the manager name, their record, and recent form. "
-        "Be witty, specific, and use hockey lingo naturally. "
-        "Be encouraging for top teams and fair but pointed for struggling ones. "
+        "You are Don Cherry — loud, opinionated, old-school hockey guy — writing the weekly power rankings "
+        "for a private NHL Legacy (PS3/Xbox 360) video game league. These are real people (the managers) "
+        "playing a video game league, so go after them personally by name. No filter, full chirp mode.\n\n"
+        "Rules:\n"
+        "- Call out managers BY NAME. If they're hot, hype them. If they're cold, bury them.\n"
+        "- Top teams: big hype, but remind them it means nothing until the playoffs\n"
+        "- Middle of the pack: question their commitment, their strategy, their life choices\n"
+        "- Bottom teams: absolutely no mercy — bury them, chirp them, drag them\n"
+        "- Use Don Cherry energy: passionate, hyperbolic, old-school hockey references, dramatic\n"
+        "- Think: 'I've never seen anything like it', 'gutless', 'beauty', 'what a bum', 'this guy'\n"
+        "- Reference their L5 record to call out streaks or collapses specifically\n"
+        "- Keep it fun and friendly — no slurs, no genuinely mean-spirited personal attacks — "
+        "but roast the HOCKEY, roast the record, roast the decisions\n"
+        "- Every comment must feel completely different from the others — vary tone, structure, length\n"
+        "- No corporate sports speak whatsoever. Raw. Unfiltered. Don Cherry.\n\n"
         "Return ONLY a JSON array, no extra text:\n"
         "[{\"code\": \"TBL\", \"comment\": \"...\"}, ...]\n\n"
         + "\n".join(lines)
@@ -190,58 +202,58 @@ def _move_str(diff):
     return '━'
 
 
-def _build_embeds(ranked, comments, state):
-    """Return [embed_top10, embed_rest] to send as a single Discord message."""
-    league_name = state.get('league', {}).get('name', 'NHL Legacy League')
-
-    # ── Top 10 with AI commentary ──────────────────────────────────────────────
+def _rank_block(ranked_slice, comments, state):
+    """Build description lines for a slice of ranked teams — all with commentary."""
     lines = []
-    for r in ranked[:10]:
+    for r in ranked_slice:
         code    = r['code']
         mgr     = _mgr_name(state, code)
         l5      = r['l5']
-        medal   = MEDALS.get(r['prRank'], f"**{r['prRank']}.**")
+        medal   = MEDALS.get(r['prRank'], f"`{r['prRank']:>2}.`")
         move    = _move_str(r['prDiff'])
         comment = comments.get(code, '')
 
+        diff_str = f"{r['gf']-r['ga']:+d}"
         header = (
             f"{medal}  {move}  **{code}**"
             + (f"  ·  {mgr}" if mgr else '')
-            + f"  —  {r['pts']} pts  |  L5: {l5['w']}-{l5['l']}-{l5['ot']}"
+            + f"  —  {r['w']}-{r['l']}-{r['otl']} ({r['pts']}pts)  |  L5: {l5['w']}-{l5['l']}-{l5['ot']}  |  {diff_str}"
         )
         lines.append(header)
         if comment:
             lines.append(f"> *{comment}*")
         lines.append('')
+    return '\n'.join(lines).rstrip()
 
-    ai_note = '✨ Groq AI · llama-3.3-70b' if config.GROQ_API_KEY else '📋 Template rankings'
-    embed1  = discord.Embed(
-        title=f'📊  {league_name} — Power Rankings',
-        description='\n'.join(lines).rstrip(),
-        color=SITE_RED,
-    )
-    embed1.set_footer(text=f'60% recent form · 40% season record  ·  {ai_note}')
 
-    # ── 11-32 compact ──────────────────────────────────────────────────────────
-    compact = []
-    for r in ranked[10:]:
-        code    = r['code']
-        mgr     = _mgr_name(state, code)
-        l5      = r['l5']
-        move    = _move_str(r['prDiff'])
-        mgr_str = f' · {mgr}' if mgr else ''
-        compact.append(
-            f"`{r['prRank']:>2}.`  {move}  **{code}**{mgr_str}"
-            f"  —  {r['pts']} pts  |  L5: {l5['w']}-{l5['l']}-{l5['ot']}"
+def _build_messages(ranked, comments, state):
+    """
+    Returns a list of embed lists — one list per Discord message.
+    Each message has one embed (10 teams max) to stay under the 6000-char limit.
+    """
+    league_name = state.get('league', {}).get('name', 'NHL Legacy League')
+    ai_note     = '✨ Groq AI · llama-3.3-70b' if config.GROQ_API_KEY else '📋 Template rankings'
+
+    chunks  = [ranked[i:i+10] for i in range(0, len(ranked), 10)]
+    messages = []
+
+    for idx, chunk in enumerate(chunks):
+        is_first = idx == 0
+        is_last  = idx == len(chunks) - 1
+
+        embed = discord.Embed(
+            description=_rank_block(chunk, comments, state),
+            color=SITE_RED if is_first else SITE_GREY,
         )
+        if is_first:
+            embed.title = f'📊  {league_name} — Power Rankings'
+            embed.set_footer(text=f'60% recent form · 40% season record  ·  {ai_note}')
+        if is_last:
+            embed.set_footer(text=f'Full standings → {config.APP_URL}')
 
-    embed2 = discord.Embed(
-        description='\n'.join(compact) if compact else '*No additional teams.*',
-        color=SITE_GREY,
-    )
-    embed2.set_footer(text=f'Full standings → {config.APP_URL}')
+        messages.append([embed])
 
-    return [embed1, embed2]
+    return messages
 
 
 # ── State persistence ──────────────────────────────────────────────────────────
@@ -339,8 +351,9 @@ class PowerRankingsCog(commands.Cog):
             return
 
         comments = await _generate_comments(ranked, state)
-        embeds   = _build_embeds(ranked, comments, state)
-        await ch.send(embeds=embeds)
+        messages = _build_messages(ranked, comments, state)
+        for msg_embeds in messages:
+            await ch.send(embeds=msg_embeds)
 
         # Persist rank snapshot so next week's arrows are accurate
         state['powerRankingsLastWeek'] = {r['code']: r['prRank'] for r in ranked}

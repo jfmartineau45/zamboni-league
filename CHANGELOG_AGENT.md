@@ -121,6 +121,42 @@ The current intended direction is:
 - Updated the small-screen layout so the main section nav becomes a horizontal, scrollable top strip instead of a cramped sidebar
 - Increased mobile nav tap-target stability so non-dashboard sections remain reachable on phones
 
+### 2026-04-04 — Score command: team labels + two-step confirm
+- Rewrote `ManualScoreModal` in `bot/commands/score.py` to use dynamic `TextInput` labels showing actual team names (`TBL score (home 🏠)` / `NYR score (away ✈️)`)
+- Added `ManualConfirmView` class (defined before `ManualScoreModal` to avoid circular reference) with ✅ Submit and ✗ Wrong buttons
+- Modal `on_submit` now shows confirmation message before POSTing — wrong scores can be re-entered without rerunning `/score`
+- Both classes use `bot_ref` for admin DM notification on submit
+
+### 2026-04-04 — Settings: unified Manager split-pane
+- Consolidated three separate manager cards (Managers, Team Assignments, Manager Profiles) into a single full-width split-pane card
+- Left column: scrollable manager list with color dot, name, team, and T/D/Z status pills (green = set, dim = missing)
+- Right column: detail/edit form — display name, color picker + swatches, primary team, co-manager team, Discord ID, Discord username, Zamboni gamertag with live autocomplete
+- Search input + filter dropdown (All / No team / No Discord / No Zamboni) on top bar
+- Save, delete, and add manager all work from within the panel without full page re-render (except add/delete)
+- Added `discordId` and `discordUsername` fields to manager data model (forward-compatible with Discord OAuth)
+- Added `zamboniTag` field for Zamboni API integration (Phase 1 of plan)
+- CSS: `.mgr-split`, `.mgr-list-col`, `.mgr-detail-col`, `.mgr-list-item`, `.mgr-status-pip`, `.mgr-detail-*`, `.mgr-color-*`, `.mgr-swatch`, responsive breakpoint at 860px
+
+### 2026-04-04 — Settings: drill-down navigation (iOS/Android style)
+- Replaced flat all-cards-on-one-page Settings layout with a drill-down menu system
+- Menu shows a card grid (icon + title + live subtitle) — one card per section
+- Admin-only sections (Discord, Playoff Format, SYS-DATA, Rules, Roster, Data) only appear when logged in
+- Clicking a card sets `_settingsSection` state variable and re-renders into a section page with `‹ Settings` back button
+- Sections: Managers, League, Seasons, Discord, Playoff Format, SYS-DATA, League Rules, NHL Roster, Data
+- Navigating away from Settings resets `_settingsSection = null` so menu shows fresh on return
+- Event handlers refactored into a `switch (_settingsSection)` block — each case scoped to its section
+- CSS: `.settings-menu-grid`, `.settings-menu-card`, `.settings-menu-icon/title/sub/arrow`, `.settings-section-page`, `.settings-back-bar`, `.settings-back-btn`, `.settings-section-heading`
+- Mobile: single-column menu grid on screens ≤600px
+
+### 2026-04-04 — Dashboard: L10 Hot/Cold cards with tie support
+- Upgraded `l5Record()` to `l5Record(teamCode, n=5)` — accepts window size, defaults to 5 for backward compat
+- Function now also returns `results` array (most-recent first) for form dot rendering
+- Hot/Cold cards now use **L10** (last 10 games) instead of L5, minimum 5 games to qualify (was 3)
+- **Tie handling**: if multiple teams share the best/worst L10 pts+wins, all tied teams shown (up to 3), with a "TIED" badge
+- Each team row shows: logo, team code, manager name, W-L-OT record, streak badge (matching standings W3/L2/OTL1 style), 10 form dots (oldest→newest, color-coded)
+- CSS: `.sct-team-row`, `.sct-trend-right`, `.sct-form-dots`, `.sct-l10-tag`, `.sct-tied-badge`
+- Power Rankings still uses L5 (formula unchanged — can be updated separately)
+
 ## Architecture Notes
 
 - **Frontend**
@@ -701,6 +737,114 @@ The agreed implementation target is:
 
 - **Known follow-up**
   - Test `/powerrankings` manually once bot is restarted with the new `POWER_RANKINGS_CHANNEL` set
+
+### 2026-04-04 — Zamboni API integration — Phase 1 (website Stats section)
+
+- **Files changed**
+  - `roster-app/server/routes/zamboni.py` (new)
+  - `roster-app/server/server.py`
+  - `roster-app/app.js`
+  - `roster-app/index.html`
+  - `roster-app/styles.css`
+
+- **What changed**
+  - New Flask proxy `server/routes/zamboni.py` with 5-min in-memory cache; three public endpoints:
+    - `GET /api/zamboni/players` → all 363 Zamboni gamertags
+    - `GET /api/zamboni/games` → all games with scores, shots, hits
+    - `GET /api/zamboni/game/<id>` → per-game detailed report (66 fields/player)
+  - Registered `zamboni_bp` in `server.py` alongside existing blueprints
+  - Added `discordId` and `zamboniTag` fields to manager profiles:
+    - New **Manager Profiles** card in Settings (admin-only): one row per manager with Discord ID text input and Zamboni gamertag autocomplete
+    - Zamboni autocomplete: fetches `/api/zamboni/players` once per session, filters 363 gamertags client-side, dropdown shows up to 8 matches
+    - Save Profiles button persists both fields to state
+  - New `fetchZamboniData(path)` async helper in `app.js`
+  - `_getZamboniPlayers()` — cached gamertag fetch, module-level `_zamboniPlayers` var
+  - New `renderStats()` function — fetches Zamboni games, filters to manager-vs-manager completed games, renders most recent 20 as score cards with date
+  - New **Stats** nav button + `section-stats` section in `index.html`
+  - CSS: `.mgr-profile-row`, `.mgr-profile-fields`, `.zamboni-wrap`, `.zamboni-drop`, `.zamboni-option` added to `styles.css`
+
+- **Why**
+  - League plays on Zamboni RPC3 servers — full game-level stats (shots, hits, PP, FO%, TOA, pims) are available via public API
+  - `discordId` enables future bot @mentions in trade grades, hot seat alerts, milestones
+  - `zamboniTag` is the bridge between league managers and Zamboni game data (Discord name ≠ Zamboni tag)
+  - Phase 1 focuses on viewing data; Phase 2 (planned) replaces manual `/score` Discord command with a two-step Zamboni game picker
+
+- **Deployment steps**
+  1. Pull changes to server
+  2. Restart Flask server — no `pip install` needed (uses stdlib `urllib.request`)
+  3. Admin: Settings → Manager Profiles → set Zamboni gamertag for each active manager → Save Profiles
+  4. Click Stats nav button to verify recent league games appear
+
+- **Known follow-up (Phase 2)**
+  - Rework Discord `/score` command to two-step Zamboni picker: (1) pick league schedule game, (2) pick Zamboni game result
+  - Store `zamboniGameId` + `zamboniStats` on approved game objects for richer box scores on the website
+
+### 2026-04-04 — Zamboni box score modal + NHL team colors
+
+- **Files changed**
+  - `roster-app/app.js`
+  - `roster-app/styles.css`
+
+- **What changed**
+  - Added `NHL_TEAM_COLORS` map (32 teams, vibrant accent colors) and `teamColor(code)` helper
+  - Rewrote `zbRenderCard()` — full box score card featuring:
+    - NHL SVG logos via `teamLogoLg()` CDN helper at 64px with drop-shadow
+    - League W-L-OT records sourced live from `calcStandings()` (not Zamboni all-time records)
+    - Winner-side tint via inline `background: linear-gradient(…teamColor…)` on the banner
+    - Winner/loser score sizes differentiated with inline `color` and `text-shadow` matching team color
+    - SVG donut charts (`zbDonut`) accept `lColor`/`rColor` so each arc segment uses team color
+    - Comparison bars (`zb-cmp-bar-l`/`r`) width set inline; `background` set inline with team color
+  - Added `getZamboniData()` — fetches all tagged managers' player histories, builds a `gameMap` keyed by Zamboni `game_id`, 5-min client cache (`_zbCache`, `_zbCacheAt`, `_ZB_TTL`)
+  - Added `showGameBoxScore(g)` — matches a played league game to a Zamboni entry by score pair (`hh.scor == homeScore && ah.scor == awayScore`), tiebreaks by closest `created_at` date; opens a wide modal with the full box score card
+  - Hooked up box-score click on `.sb-game-stats` in Scores feed (event delegation)
+  - Hooked up box-score click on `.game-card-stats` in Schedule/game list (per-card listener)
+  - Games with both managers tagged show `📊 Box Score` hint badge; untagged games are unchanged
+  - Bug fixes:
+    - `pims` field is seconds → displayed as `m:ss` (was briefly treated as raw minutes)
+    - OT detection changed from `lh.otl || rh?.otl` to `lh.otg > 0 || rh?.otg > 0` (OT goal flag is reliable; `otl` flag is unreliable)
+    - Removed duplicate "Power Play Goals" stat row; kept combined "Power Play" as `ppg/ppo`
+    - Cleaned up stale `mgrRecord` parameter from all `zbRenderCard` call sites
+  - New CSS: `.zb-banner`, `.zb-banner-side`, `.zb-banner-logo`, `.zb-banner-info`, `.zb-banner-code`, `.zb-banner-mgr`, `.zb-banner-rec`, `.zb-banner-center`, `.zb-banner-scores`, `.zb-banner-score`, `.zb-score-w`, `.zb-banner-final-wrap`, `.zb-banner-final`, `.zb-banner-date`, `.zb-cmp-bar-l`, `.zb-cmp-bar-r`
+
+- **Why**
+  - The original box score card used plain PNG logos, showed all-time Zamboni records (meaningless), had no team identity colors, and ignored OT correctly
+  - Real league records + NHL colors + SVG logos makes the box score modal feel like a proper broadcast-style result screen
+  - Team colors on the donut/bar charts make shot%, TOA%, and FOW% splits instantly scannable
+
+- **Known follow-up**
+  - Fix `boomberhabs45` zamboniTag typo directly in SQLite DB (zamboniTag should be `boomerhabs45`) — already done via Python script in dev
+  - Tag remaining ~30 managers via Settings → Manager Profiles to unlock box score for all league games
+  - Phase 2: `/api/boxscore/<game_id>` endpoint for Discord Playwright screenshot of the box score card
+
+### 2026-04-04 — Stats merged into Standings (combined sortable table)
+
+- **Files changed**
+  - `roster-app/app.js`
+  - `roster-app/index.html`
+  - `roster-app/styles.css`
+
+- **What changed**
+  - Fully rewrote `renderStandings()` — now builds all stats from `state.games` directly (no longer calls `calcStandings()`) and renders a single wide sortable table with columns: `#`, Team, GP, W, L, OTL, PTS, P%, RW, GF, GA, DIFF, GF/GP, GA/GP, HOME, AWAY, L5, STK
+  - All numeric columns are sortable via `th[data-sort]` click; active sort column shows ▲/▼ arrow; re-sorts in-place via `_statSort = { col, dir }` module state
+  - Column leaders highlighted in gold (`td.stat-leader`)
+  - Playoff cutline at top 16: in-playoff rows have blue left border (`stn-in`), out-playoff rows are dimmed (`stn-out`), cutline row has red bottom shadow (`stn-cutline`)
+  - Last 5 form: colored dots W=green, L=red, OTL=amber
+  - Streak badge: W=green, L=red, OTL=amber
+  - Home/away splits as compact `W-L-OTL` strings
+  - Removed **Stats** nav button from `index.html`
+  - Removed `<section id="section-stats">` from `index.html`
+  - Removed `case 'stats': renderStats(); break;` from `renderSection()` switch
+  - Removed dead `renderStats()` function (was referencing the deleted `section-stats` element)
+  - Added `.stn-table` CSS and supporting stat display classes (`.diff-pos`, `.diff-neg`, `.stat-split`, `.stat-form`, `.form-dot`, `.form-w`, `.form-l`, `.form-otl`, `.streak-badge`, `.streak-w`, `.streak-l`, `.streak-otl`)
+
+- **Why**
+  - Separate Stats page was redundant with Standings and cluttered the nav; all useful per-team metrics are now one sortable table
+  - Combined view enables power-rankings-style sorting (sort by DIFF, GF/GP, L5 etc.) without switching pages
+  - Removing the dead `renderStats()` and `section-stats` element eliminates a JS runtime error (querySelector on non-existent element)
+
+- **Known follow-up**
+  - Phase 2: once `zamboniStats` is stored on game objects (via Discord `/score` Zamboni picker), add Shots, Hits, TOA, FO%, PP% columns to this same table for even richer power-ranking data
+  - Zamboni columns slot in naturally since the table is already sortable
 
 ## Update Rule For Future Sessions
 

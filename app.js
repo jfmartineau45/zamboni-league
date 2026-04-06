@@ -108,6 +108,46 @@ const NHL_TEAMS = [
   {id:31, code:"SEA", name:"Seattle Kraken"},
 ];
 
+// Primary brand color per team — used in box score bars & donut charts.
+// Picked for readability on dark backgrounds; secondary color used where
+// the true primary is too dark (e.g. navy teams get their accent).
+const NHL_TEAM_COLORS = {
+  ANA: '#F47A38',  // Ducks orange
+  BOS: '#FFB81C',  // Bruins gold
+  BUF: '#003E7E',  // Sabres royal blue
+  CGY: '#C8102E',  // Flames red
+  CAR: '#CC0000',  // Hurricanes red
+  CHI: '#CF0A2C',  // Blackhawks red
+  COL: '#6F263D',  // Avalanche burgundy
+  CBJ: '#CE1126',  // Blue Jackets red
+  DAL: '#006847',  // Stars victory green
+  DET: '#CE1126',  // Red Wings red
+  EDM: '#FF4C00',  // Oilers orange
+  FLA: '#B9975B',  // Panthers gold (avoids clash with too many reds)
+  LAK: '#A2AAAD',  // Kings silver
+  MIN: '#A6192E',  // Wild red
+  MTL: '#AF1E2D',  // Canadiens red
+  NSH: '#FFB81C',  // Predators gold
+  NJD: '#CE1126',  // Devils red
+  NYI: '#F47D30',  // Islanders orange
+  NYR: '#0038A8',  // Rangers blue
+  OTT: '#E31837',  // Senators red
+  PHI: '#F74902',  // Flyers orange
+  PIT: '#FCB514',  // Penguins gold
+  SEA: '#99D9D9',  // Kraken ice blue
+  SJS: '#00B2A9',  // Sharks teal
+  STL: '#0038A8',  // Blues royal blue
+  TBL: '#2563A8',  // Lightning blue (lighter for dark bg)
+  TOR: '#00205B',  // Leafs navy — use accent
+  UTA: '#69B3E7',  // Utah Hockey Club sky blue
+  VAN: '#00843D',  // Canucks green
+  VGK: '#B4975A',  // Golden Knights gold
+  WSH: '#C8102E',  // Capitals red
+  WPG: '#004C97',  // Jets blue
+};
+// Fallback for any unmapped code
+function teamColor(code) { return NHL_TEAM_COLORS[code] || '#5b8fc9'; }
+
 // League defaults — 32 managers mapped to their teams
 const LEAGUE_DEFAULTS = {
   managers: [
@@ -174,6 +214,13 @@ let isAdmin = false;
 let currentSection = 'dashboard';
 let _adminToken = sessionStorage.getItem('nhl-admin-token') || '';
 let _apiAvailable = false;    // true once we've successfully talked to /api/state
+let _zamboniPlayers = null;   // cached gamertag list from /api/zamboni/players
+let _zbCache     = null;      // cached { tagMap, gameMap, mgrRecord } for box scores
+let _zbCacheAt   = 0;
+const _ZB_TTL        = 30 * 60 * 1000; // 30-min in-memory cache
+const _ZB_SS_KEY     = 'nhl_zb_cache';  // sessionStorage key
+let _statSort        = { col: 'pts', dir: -1 }; // Stats leaderboard sort state
+let _settingsSection = null;                  // null = menu, string = active section id
 
 function normalizeSysDataFile(file) {
   if (!file) return null;
@@ -472,6 +519,7 @@ function navigate(section) {
   $(`section-${section}`).classList.add('active');
   document.querySelector(`.nav-btn[data-section="${section}"]`)?.classList.add('active');
   currentSection = section;
+  if (section !== 'settings') _settingsSection = null;
   renderSection(section);
 }
 
@@ -480,9 +528,9 @@ function renderSection(section) {
     case 'dashboard': renderDashboard(); break;
     case 'teams':     renderTeams();     break;
     case 'players':   renderPlayers();   break;
-    case 'scores':    renderScores();    break;
+    case 'scores':    renderScores();    zbWarmCache(); break;
     case 'draft':     renderDraft();     break;
-    case 'schedule':  renderSchedule();  break;
+    case 'schedule':  renderSchedule();  zbWarmCache(); break;
     case 'standings': renderStandings(); break;
     case 'playoffs':  renderPlayoffs();  break;
     case 'trades':    renderTrades();    break;
@@ -545,36 +593,38 @@ function renderPlayoffRace(standings) {
   return `<div class="race-conf-col">${html}</div>`;
 }
 
-function l5Record(teamCode) {
+function l5Record(teamCode, n = 5) {
   const played = state.games
     .filter(g => g.played && !g.playoff && (g.homeTeam === teamCode || g.awayTeam === teamCode))
     .sort((a, b) => (b.playedAt || b.date || '').localeCompare(a.playedAt || a.date || ''))
-    .slice(0, 5);
+    .slice(0, n);
   let w = 0, l = 0, ot = 0;
   // Current streak: count consecutive same results from most recent game
   let streak = 0, streakType = '';
+  const results = [];
   played.forEach((g, i) => {
     const isHome = g.homeTeam === teamCode;
     const gf = isHome ? +g.homeScore : +g.awayScore;
     const ga = isHome ? +g.awayScore : +g.homeScore;
     const result = gf > ga ? 'W' : (g.ot ? 'OTL' : 'L');
+    results.push(result);
     if (gf > ga) w++;
     else if (g.ot) ot++;
     else l++;
     if (i === 0) { streak = 1; streakType = result; }
     else if (result === streakType) streak++;
   });
-  return { w, l, ot, pts: w * 2 + ot, games: played.length, streak, streakType };
+  return { w, l, ot, pts: w * 2 + ot, games: played.length, streak, streakType, results };
 }
 
 function calcPowerRankings() {
   const standings = calcStandings();
   const ranked = standings.map(t => {
-    const l5 = l5Record(t.teamCode);
-    const formPct   = l5.games > 0 ? l5.pts / (l5.games * 2) : 0;
+    const l10 = l5Record(t.teamCode, 10);
+    const formPct   = l10.games > 0 ? l10.pts / (l10.games * 2) : 0;
     const seasonPct = t.gp > 0 ? t.pts / (t.gp * 2) : 0;
     const score = (formPct * 0.6) + (seasonPct * 0.4);
-    return { ...t, prScore: score, l5 };
+    return { ...t, prScore: score, l10 };
   }).sort((a, b) => b.prScore - a.prScore || b.pts - a.pts);
 
   // Attach rank + diff vs stored last-week rank
@@ -652,16 +702,24 @@ function renderDashboard() {
 
   const fmtTradeName = p => typeof p === 'string' ? p : (PLAYER_DB[p] || `#${p}`);
 
-  // Hottest / coldest (min 3 games played in L5 to qualify)
-  let hotTeam = null, coldTeam = null;
+  // Hottest / coldest — L10, min 5 games to qualify, ties both shown (max 3)
+  let hotTeams = [], coldTeams = [];
   if (standings.length >= 4) {
-    const withL5 = standings
-      .map(t => ({ ...t, l5: l5Record(t.teamCode) }))
-      .filter(t => t.l5.games >= 3);
-    if (withL5.length) {
-      withL5.sort((a, b) => b.l5.pts - a.l5.pts || b.l5.w - a.l5.w);
-      hotTeam  = withL5[0];
-      coldTeam = withL5[withL5.length - 1];
+    const withL10 = standings
+      .map(t => ({ ...t, l10: l5Record(t.teamCode, 10) }))
+      .filter(t => t.l10.games >= 5);
+    if (withL10.length >= 2) {
+      withL10.sort((a, b) => b.l10.pts - a.l10.pts || b.l10.w - a.l10.w);
+      const topPts = withL10[0].l10.pts;
+      const topW   = withL10[0].l10.w;
+      hotTeams = withL10.filter(t => t.l10.pts === topPts && t.l10.w === topW).slice(0, 3);
+      withL10.sort((a, b) => a.l10.pts - b.l10.pts || a.l10.w - b.l10.w);
+      const botPts = withL10[0].l10.pts;
+      const botW   = withL10[0].l10.w;
+      coldTeams = withL10
+        .filter(t => t.l10.pts === botPts && t.l10.w === botW)
+        .filter(t => !hotTeams.find(h => h.teamCode === t.teamCode))
+        .slice(0, 3);
     }
   }
 
@@ -674,25 +732,42 @@ function renderDashboard() {
     return { gap: allSorted[15].pts - allSorted[16].pts, in: allSorted[15], out: allSorted[16] };
   })();
 
-  const l5Label = r => {
-    const rec = `${r.w}-${r.l}${r.ot ? `-${r.ot}` : ''}`;
-    const streak = r.streakType ? ` · ${r.streakType}${r.streak}` : '';
-    return rec + streak;
+  const _fdot = r => {
+    const cls = r==='W'?'form-w':r==='OTL'?'form-otl':'form-l';
+    return `<span class="form-dot ${cls}" style="font-size:.6rem;width:16px;height:16px">${r==='OTL'?'O':r}</span>`;
   };
-  const trendCard = (team, type) => {
-    if (!team) return `<div class="stat-card stat-card-trend"><div class="sct-label">${type === 'hot' ? '🔥 Hottest' : '❄️ Coldest'}</div><div class="sct-empty">—</div></div>`;
+  const _strkBadge = (streakType, streak) => {
+    if (!streakType) return '';
+    const cls = streakType==='W'?'streak-w':streakType==='OTL'?'streak-otl':'streak-l';
+    return `<span class="streak-badge ${cls}" style="font-size:.68rem">${streakType}${streak}</span>`;
+  };
+  const trendCard = (teams, type) => {
+    const label = type === 'hot' ? '🔥 Hottest' : '❄️ Coldest';
+    if (!teams.length) return `<div class="stat-card stat-card-trend"><div class="sct-label">${label}</div><div class="sct-empty">—</div></div>`;
     const accent = type === 'hot' ? 'var(--stat-hot)' : 'var(--stat-cold)';
-    return `
-      <div class="stat-card stat-card-trend" style="--accent:${accent}">
-        <div class="sct-label">${type === 'hot' ? '🔥 Hottest' : '❄️ Coldest'}</div>
-        <div class="sct-team">
-          ${teamLogoLg(team.teamCode, 38)}
+    const teamRows = teams.map(team => {
+      const r = team.l10;
+      const rec = `${r.w}-${r.l}${r.ot ? `-${r.ot}` : ''}`;
+      // results: most-recent first → reverse to show oldest→newest L→R
+      const dots = (r.results || []).slice().reverse().map(_fdot).join('');
+      return `
+        <div class="sct-team-row">
+          ${teamLogoLg(team.teamCode, 32)}
           <div class="sct-info">
             <span class="sct-code">${team.teamCode}</span>
             <span class="sct-mgr">${teamOwnerName(team.teamCode)}</span>
           </div>
-        </div>
-        <div class="sct-record">${l5Label(team.l5)}</div>
+          <div class="sct-trend-right">
+            <span class="sct-record">${rec} ${_strkBadge(r.streakType, r.streak)}</span>
+            <div class="sct-form-dots">${dots}</div>
+          </div>
+        </div>`;
+    }).join('');
+    const tiedBadge = teams.length > 1 ? `<span class="sct-tied-badge">TIED</span>` : '';
+    return `
+      <div class="stat-card stat-card-trend" style="--accent:${accent}">
+        <div class="sct-label">${label} <span class="sct-l10-tag">L10</span>${tiedBadge}</div>
+        ${teamRows}
       </div>`;
   };
 
@@ -733,8 +808,8 @@ function renderDashboard() {
 
     <!-- STAT CARDS -->
     <div class="dash-grid">
-      ${trendCard(hotTeam, 'hot')}
-      ${trendCard(coldTeam, 'cold')}
+      ${trendCard(hotTeams, 'hot')}
+      ${trendCard(coldTeams, 'cold')}
       ${bubbleCard(bubble16)}
       <div class="stat-card stat-card-week">
         <div class="sct-label">📅 Season${isAdmin ? ' <button class="btn btn-ghost btn-xs" id="set-week-btn" style="font-size:.65rem">⚙️</button>' : ''}</div>
@@ -778,6 +853,7 @@ function renderDashboard() {
               <div class="sb-sep">
                 <span class="sb-ot">${g.ot ? 'OT' : ''}</span>
                 <span class="sb-vs">Final</span>
+                ${g.isMakeup ? `<span class="badge-mu">MU</span>` : ''}
                 ${g.postedAt ? `<span class="sb-posted">${fmtDateTime(g.postedAt)}</span>` : (g.week ? `<span class="sb-posted">Wk ${g.week}</span>` : '')}
               </div>
               <div class="sb-team ${!homeWin ? 'sb-winner' : 'sb-loser'}">
@@ -795,7 +871,24 @@ function renderDashboard() {
 
       <!-- Upcoming Games -->
       <div class="panel conf-standings">
-        <div class="conf-header"><span class="conf-title">Upcoming Games</span></div>
+        <div class="conf-header">
+          <span class="conf-title">📅 Week ${currentWeek}</span>
+          ${(() => {
+            const wkGames  = state.games.filter(g => !g.playoff && g.week === currentWeek);
+            const wkPlayed = wkGames.filter(g => g.played).length;
+            const wkTotal  = wkGames.length;
+            if (!wkTotal) return '';
+            const pct = Math.round((wkPlayed / wkTotal) * 100);
+            const allDone = wkPlayed === wkTotal;
+            return `
+              <div class="wk-progress-wrap">
+                <span class="wk-progress-label ${allDone ? 'wk-done' : ''}">${wkPlayed}/${wkTotal}${allDone ? ' ✓' : ''}</span>
+                <div class="wk-progress-bar">
+                  <div class="wk-progress-fill ${allDone ? 'wk-fill-done' : ''}" style="width:${pct}%"></div>
+                </div>
+              </div>`;
+          })()}
+        </div>
         <div class="panel-body" style="padding:0">
           ${upcoming.length ? upcoming.map(g => `
             <div class="sb-game sb-upcoming">
@@ -826,7 +919,7 @@ function renderDashboard() {
       <div class="panel conf-standings" id="dash-power-rankings">
         <div class="conf-header">
           <span class="conf-title">⚡ Power Rankings</span>
-          <span class="conf-sub">60% recent form · 40% season record</span>
+          <span class="conf-sub">60% L10 form · 40% season record</span>
         </div>
         <div class="panel-body" style="padding:0">
           ${(() => {
@@ -838,7 +931,14 @@ function renderDashboard() {
                 : diff > 0  ? `<span class="pr-diff pr-diff-up">▲${diff}</span>`
                 : diff < 0  ? `<span class="pr-diff pr-diff-dn">▼${Math.abs(diff)}</span>`
                 : '<span class="pr-diff pr-diff-eq">—</span>';
-              const l5str = t.l5.games > 0 ? `${t.l5.w}-${t.l5.l}${t.l5.ot ? `-${t.l5.ot}` : ''}` : '—';
+              const r = t.l10;
+              const l10str = r.games > 0 ? `${r.w}-${r.l}${r.ot ? `-${r.ot}` : ''}` : '—';
+              const dots = r.games > 0
+                ? (r.results||[]).slice().reverse().map(res => {
+                    const cls = res==='W'?'form-w':res==='OTL'?'form-otl':'form-l';
+                    return `<span class="form-dot ${cls}" style="font-size:.5rem;width:13px;height:13px">${res==='OTL'?'O':res}</span>`;
+                  }).join('')
+                : '';
               return `
               <div class="pr-row${i === 0 ? ' pr-row-top' : ''}">
                 <span class="pr-rank">${t.prRank}</span>
@@ -850,7 +950,8 @@ function renderDashboard() {
                 </span>
                 <span class="pr-stats">
                   <span class="pr-pts">${t.pts} pts</span>
-                  <span class="pr-l5">L5: ${l5str}</span>
+                  <span class="pr-l10">${l10str}</span>
+                  ${dots ? `<span class="pr-dots">${dots}</span>` : ''}
                 </span>
               </div>`;
             }).join('');
@@ -1575,7 +1676,12 @@ function sortGames(games) {
   });
 }
 
+const PO_ROUND_LABELS = ['🏒 First Round', '🏒 Second Round', '🏒 Conference Finals', '🏆 Championship'];
 function weekDateRange(w) {
+  if (w >= 100) {
+    const label = PO_ROUND_LABELS[w - 100] || `🏒 Playoffs Round ${w - 99}`;
+    return `${label} — Playoffs`;
+  }
   if (!state.scheduleStartDate) return `Week ${w}`;
   const start = new Date(state.scheduleStartDate.includes('T') ? state.scheduleStartDate : state.scheduleStartDate + 'T00:00:00');
   start.setDate(start.getDate() + (w - 1) * 7);
@@ -1591,8 +1697,19 @@ function renderSchedule() {
   const el_ = $('section-schedule');
   const sorted = sortGames(state.games);
 
-  // Filter by team and status
-  let filtered = sorted;
+  // Playoff games — always visible at top regardless of filter
+  const allPlayoffGames = sorted.filter(g => g.playoff);
+  const playoffByWeek = [];
+  for (const g of allPlayoffGames) {
+    if (_scheduleFilter.team && g.homeTeam !== _scheduleFilter.team && g.awayTeam !== _scheduleFilter.team) continue;
+    const w = g.week;
+    let wg = playoffByWeek.find(x => x.week === w);
+    if (!wg) { wg = { week: w, games: [] }; playoffByWeek.push(wg); }
+    wg.games.push(g);
+  }
+
+  // Regular season games — apply normal filters (exclude playoff games)
+  let filtered = sorted.filter(g => !g.playoff);
   if (_scheduleFilter.team) {
     filtered = filtered.filter(g => g.homeTeam === _scheduleFilter.team || g.awayTeam === _scheduleFilter.team);
   }
@@ -1602,7 +1719,7 @@ function renderSchedule() {
     filtered = filtered.filter(g => g.played);
   }
 
-  // Group games by week for display
+  // Group regular season games by week for display
   const weeks = [];
   for (const g of filtered) {
     const w = g.week || 0;
@@ -1639,13 +1756,25 @@ function renderSchedule() {
     </div>
 
     <div id="games-list">
+      ${playoffByWeek.length ? `
+        <div class="playoff-schedule-banner">
+          <img src="assets/ZamboniCupPlayoffs.png" style="width:22px;height:22px;object-fit:contain;vertical-align:middle">
+          <span>PLAYOFFS</span>
+        </div>
+        ${playoffByWeek.map(w => `
+          <div class="week-block week-block-playoff">
+            <div class="week-label week-label-playoff">${weekDateRange(w.week)}</div>
+            ${renderGamesList(w.games)}
+          </div>`).join('')}
+        <div class="playoff-schedule-divider"></div>` : ''}
+
       ${weeks.length ? weeks.map(w => `
         <div class="week-block">
           <div class="week-label">${w.week ? weekDateRange(w.week) : 'Games'}</div>
           ${renderGamesList(w.games)}
         </div>`).join('') : `
         <div class="empty-state" style="padding:60px 0">
-          
+
           <p>No games scheduled</p>
           ${isAdmin ? '<p class="mt-8"><button class="btn btn-primary" id="add-game-btn2">+ Add First Game</button></p>' : ''}
         </div>`}
@@ -1674,18 +1803,23 @@ function renderGamesList(games) {
   return games.map(g => {
     const hw = g.played && +g.homeScore > +g.awayScore;
     const aw = g.played && +g.awayScore > +g.homeScore;
+    const homeMgr = state.managers.find(m => m.id === state.teamOwners[g.homeTeam]);
+    const awayMgr = state.managers.find(m => m.id === state.teamOwners[g.awayTeam]);
+    const hasStats = g.played && !!(homeMgr?.zamboniTag && awayMgr?.zamboniTag);
     return `
-      <div class="game-card" data-gid="${g.id}">
+      <div class="game-card ${hasStats ? 'game-card-stats' : ''}" data-gid="${g.id}">
         <div class="game-teams">
           <span class="${hw?'winner-team':g.played?'loser-team':''}" style="display:inline-flex;align-items:center;gap:8px">${teamLogoLg(g.homeTeam,42)} <span><span style="font-weight:700">${g.homeTeam}</span> <span class="text-xs text-muted">${teamOwnerName(g.homeTeam)}</span></span></span>
           <span class="vs-sep">vs</span>
           <span class="${aw?'winner-team':g.played?'loser-team':''}" style="display:inline-flex;align-items:center;gap:8px">${teamLogoLg(g.awayTeam,42)} <span><span style="font-weight:700">${g.awayTeam}</span> <span class="text-xs text-muted">${teamOwnerName(g.awayTeam)}</span></span></span>
+          ${g.isMakeup ? `<span class="badge-mu">MU</span>` : ''}
           ${g.notes ? `<span class="text-xs text-dim">${g.notes}</span>` : ''}
         </div>
         <div class="game-score ${g.played?'':'pending'}">
           ${g.played ? `${g.homeScore}–${g.awayScore}${g.ot?' OT':''}` : 'TBD'}
         </div>
         <div class="game-actions">
+          ${hasStats ? '<span class="game-stats-btn" title="View box score">📊</span>' : ''}
           ${isAdmin ? `
             <button class="btn btn-accent btn-sm enter-score-btn" data-gid="${g.id}">
               ${g.played ? 'Edit' : 'Score'}
@@ -1712,6 +1846,12 @@ document.addEventListener('click', e => {
       renderSchedule();
     }
   }
+  // Box score click on schedule game cards
+  const card = e.target.closest('.game-card-stats');
+  if (card && !e.target.closest('button') && !e.target.closest('.enter-score-btn') && !e.target.closest('.del-game-btn')) {
+    const g = state.games.find(x => x.id === card.dataset.gid);
+    if (g) showGameBoxScore(g);
+  }
 });
 
 function showAddGame() {
@@ -1737,13 +1877,17 @@ function showAddGame() {
       <label>Notes (optional)</label>
       <input type="text" id="game-notes" placeholder="Playoff game, etc.">
     </div>
+    <div class="form-row" style="display:flex;align-items:center;gap:8px">
+      <input type="checkbox" id="game-makeup" style="width:auto">
+      <label for="game-makeup" style="text-transform:none">Makeup game <span class="badge-mu" style="margin-left:4px">MU</span></label>
+    </div>
     <button id="modal-ok" class="btn btn-primary btn-block mt-12">Add Game</button>
   `, () => {
     const home = $('game-home').value, away = $('game-away').value;
     if (home === away) { toast('Home and away teams must differ', 'error'); return; }
     const week = Math.max(1, +$('game-week').value || 1);
     const gamesInWeek = state.games.filter(g => g.week === week).length;
-    state.games.push({ id: uid(), week, game: gamesInWeek + 1, homeTeam: home, awayTeam: away, notes: $('game-notes').value, played: false, homeScore: 0, awayScore: 0, ot: false });
+    state.games.push({ id: uid(), week, game: gamesInWeek + 1, homeTeam: home, awayTeam: away, notes: $('game-notes').value, played: false, homeScore: 0, awayScore: 0, ot: false, isMakeup: !!$('game-makeup')?.checked });
     saveState();
     hideModal();
     renderSchedule();
@@ -1768,14 +1912,21 @@ function showEnterScore(g) {
       <input type="checkbox" id="score-ot" ${g.ot?'checked':''} style="width:auto">
       <label for="score-ot" style="text-transform:none">Overtime / Shootout</label>
     </div>
+    <div class="form-row" style="display:flex;align-items:center;gap:8px">
+      <input type="checkbox" id="score-makeup" ${g.isMakeup?'checked':''} style="width:auto">
+      <label for="score-makeup" style="text-transform:none">Makeup game <span class="badge-mu" style="margin-left:4px">MU</span></label>
+    </div>
     <button id="modal-ok" class="btn btn-primary btn-block mt-12">Save Result</button>
   `, () => {
     const hs = +$('score-home').value, as_ = +$('score-away').value;
     if (hs === as_) { toast('Scores cannot be tied', 'error'); return; }
-    g.homeScore = hs; g.awayScore = as_; g.ot = $('score-ot').checked; g.played = true; g.postedAt = new Date().toISOString();
-    saveState();
+    g.homeScore = hs; g.awayScore = as_; g.ot = $('score-ot').checked; g.played = true;
+    g.isMakeup = !!$('score-makeup')?.checked;
+    g.postedAt = new Date().toISOString();
+    if (g.playoff) recalcPlayoffBracket(); else saveState();
     hideModal();
     renderSchedule();
+    if (g.playoff && currentSection === 'playoffs') renderPlayoffs();
     toast('Score saved!', 'success');
   });
 }
@@ -1858,16 +2009,19 @@ let _scoresFilter = { week: 'all' };
 function renderScores() {
   const el_ = $('section-scores');
   const played = state.games
-    .filter(g => g.played && !g.playoff)
+    .filter(g => g.played)
     .sort((a, b) => (b.postedAt || b.playedAt || b.date || '').localeCompare(a.postedAt || a.playedAt || a.date || ''));
 
-  const weeks = [...new Set(played.map(g => g.week).filter(Boolean))].sort((a, b) => a - b);
+  const hasPlayoffs = played.some(g => g.playoff);
+  const regWeeks = [...new Set(played.filter(g => !g.playoff).map(g => g.week).filter(Boolean))].sort((a, b) => a - b);
 
-  if (_scoresFilter.week !== 'all' && !weeks.includes(_scoresFilter.week)) {
+  if (_scoresFilter.week !== 'all' && _scoresFilter.week !== 'playoffs' && !regWeeks.includes(_scoresFilter.week)) {
     _scoresFilter.week = 'all';
   }
 
-  const visible = _scoresFilter.week === 'all' ? played : played.filter(g => g.week === _scoresFilter.week);
+  const visible = _scoresFilter.week === 'all'     ? played
+                : _scoresFilter.week === 'playoffs' ? played.filter(g => g.playoff)
+                : played.filter(g => g.week === _scoresFilter.week && !g.playoff);
 
   el_.innerHTML = `
     <div class="section-header">
@@ -1875,13 +2029,17 @@ function renderScores() {
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;align-items:center">
       <button class="btn btn-xs ${_scoresFilter.week === 'all' ? 'btn-primary' : 'btn-ghost'} scores-wk-btn" data-wk="all">All</button>
-      ${weeks.map(w => `<button class="btn btn-xs ${_scoresFilter.week === w ? 'btn-primary' : 'btn-ghost'} scores-wk-btn" data-wk="${w}">Wk ${w}</button>`).join('')}
+      ${hasPlayoffs ? `<button class="btn btn-xs ${_scoresFilter.week === 'playoffs' ? 'btn-primary' : 'btn-ghost'} scores-wk-btn" data-wk="playoffs">🏆 Playoffs</button>` : ''}
+      ${regWeeks.map(w => `<button class="btn btn-xs ${_scoresFilter.week === w ? 'btn-primary' : 'btn-ghost'} scores-wk-btn" data-wk="${w}">Wk ${w}</button>`).join('')}
     </div>
     <div class="panel" style="padding:0">
       ${visible.length ? visible.map(g => {
         const homeWin = +g.homeScore > +g.awayScore;
+        const homeMgr = state.managers.find(m => m.id === state.teamOwners[g.homeTeam]);
+        const awayMgr = state.managers.find(m => m.id === state.teamOwners[g.awayTeam]);
+        const hasStats = !!(homeMgr?.zamboniTag && awayMgr?.zamboniTag);
         return `
-        <div class="sb-game">
+        <div class="sb-game ${hasStats ? 'sb-game-stats' : ''}" data-gid="${g.id}">
           <div class="sb-team ${homeWin ? 'sb-winner' : 'sb-loser'}">
             <div class="sb-logo">${teamLogoLg(g.homeTeam, 52)}</div>
             <div class="sb-info">
@@ -1893,7 +2051,10 @@ function renderScores() {
           <div class="sb-sep">
             <span class="sb-ot">${g.ot ? 'OT' : ''}</span>
             <span class="sb-vs">Final</span>
-            ${g.postedAt ? `<span class="sb-posted">${fmtDateTime(g.postedAt)}</span>` : (g.week ? `<span class="sb-posted">Wk ${g.week}</span>` : '')}
+            ${g.isMakeup ? `<span class="badge-mu">MU</span>` : ''}
+            ${g.playoff && g.notes ? `<span class="sb-posted" style="color:var(--gold,#c8a84e)">${g.notes}</span>` : (g.week ? `<span class="sb-posted">Wk ${g.week}</span>` : '')}
+            ${g.postedAt ? `<span class="sb-posted">${fmtDateTime(g.postedAt)}</span>` : ''}
+            ${hasStats ? '<span class="sb-stats-hint">📊 Box Score</span>' : ''}
           </div>
           <div class="sb-team ${!homeWin ? 'sb-winner' : 'sb-loser'}">
             <div class="sb-score ${!homeWin ? 'sb-score-win' : ''}">${g.awayScore}</div>
@@ -1911,8 +2072,17 @@ function renderScores() {
   el_.querySelectorAll('.scores-wk-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const wk = btn.dataset.wk;
-      _scoresFilter.week = wk === 'all' ? 'all' : +wk;
+      _scoresFilter.week = wk === 'all' ? 'all' : wk === 'playoffs' ? 'playoffs' : +wk;
       renderScores();
+    });
+  });
+
+  // Click any game card with stats to open box score modal
+  el_.querySelectorAll('.sb-game-stats').forEach(card => {
+    card.addEventListener('click', e => {
+      if (e.target.closest('button')) return; // don't intercept admin buttons
+      const g = state.games.find(x => x.id === card.dataset.gid);
+      if (g) showGameBoxScore(g);
     });
   });
 }
@@ -1922,10 +2092,12 @@ function renderScores() {
 // ================================================================
 function renderStandings() {
   const el_ = $('section-standings');
-  const all  = calcStandings();
   const po   = state.playoffs;
 
-  if (!all.length) {
+  // ── Build enriched rows from league games ─────────────────────────────────
+  const played = state.games.filter(g => g.played && !g.playoff);
+
+  if (!played.length) {
     el_.innerHTML = `
       <div class="page-header"><h2>Standings</h2></div>
       <div class="empty-state" style="padding:80px 0">
@@ -1935,65 +2107,223 @@ function renderStandings() {
     return;
   }
 
-  const byPts = (a, b) => b.pts - a.pts || b.rw - a.rw || (b.gf - b.ga) - (a.gf - a.ga);
-  all.sort(byPts);
+  const map = {};
+  const ensure = code => {
+    if (!map[code]) map[code] = {
+      code, teamName: NHL_TEAMS.find(t=>t.code===code)?.name || code,
+      gp:0, w:0, l:0, ot:0, pts:0, gf:0, ga:0, rw:0,
+      homeGp:0, homeW:0, homeL:0, homeOtl:0,
+      awayGp:0, awayW:0, awayL:0, awayOtl:0,
+      results:[],
+    };
+    return map[code];
+  };
 
-  const pct = t => t.gp ? (t.pts / (t.gp * 2)).toFixed(3).replace(/^0/, '') : '.000';
+  const byDate = [...played].sort((a,b)=>
+    (a.postedAt||a.date||'').localeCompare(b.postedAt||b.date||''));
 
+  byDate.forEach(g => {
+    const hs = +g.homeScore, as_ = +g.awayScore;
+    const h = ensure(g.homeTeam), a = ensure(g.awayTeam);
+    h.gp++; a.gp++;
+    h.gf += hs; h.ga += as_; a.gf += as_; a.ga += hs;
+    h.homeGp++; a.awayGp++;
+    if (g.ot) {
+      if (hs > as_) {
+        h.w++; h.pts+=2; h.rw++; h.homeW++;
+        a.ot++; a.pts+=1; a.awayOtl++;
+        h.results.push('W'); a.results.push('OTL');
+      } else {
+        a.w++; a.pts+=2; a.rw++; a.awayW++;
+        h.ot++; h.pts+=1; h.homeOtl++;
+        a.results.push('W'); h.results.push('OTL');
+      }
+    } else {
+      if (hs > as_) {
+        h.w++; h.pts+=2; h.rw++; h.homeW++;
+        a.l++; a.awayL++;
+        h.results.push('W'); a.results.push('L');
+      } else {
+        a.w++; a.pts+=2; a.rw++; a.awayW++;
+        h.l++; h.homeL++;
+        a.results.push('W'); h.results.push('L');
+      }
+    }
+  });
+
+  let rows = Object.values(map).filter(t => t.gp > 0);
+  rows.forEach(t => {
+    t.diff    = t.gf - t.ga;
+    t.pct     = t.gp ? t.pts / (t.gp * 2) : 0;
+    t.gfPerGp = t.gp ? t.gf / t.gp : 0;
+    t.gaPerGp = t.gp ? t.ga / t.gp : 0;
+    t.homeRec = `${t.homeW}-${t.homeL}${t.homeOtl?'-'+t.homeOtl:''}`;
+    t.awayRec = `${t.awayW}-${t.awayL}${t.awayOtl?'-'+t.awayOtl:''}`;
+    t.last5   = t.results.slice(-5);
+    const last = t.results[t.results.length-1];
+    let stk = 0;
+    for (let i=t.results.length-1; i>=0; i--) {
+      if (t.results[i]===last) stk++; else break;
+    }
+    t.streak = last ? { type:last, count:stk } : null;
+  });
+
+  // ── Sort ──────────────────────────────────────────────────────────────────
+  // Default: pts desc, tiebreak rw, then diff
+  const defaultSort = (a,b) => b.pts-a.pts || b.rw-a.rw || (b.gf-b.ga)-(a.gf-a.ga);
+  rows.sort((a,b) => {
+    const col = _statSort.col;
+    if (!col || col === 'pts') return _statSort.dir * defaultSort(a,b) * -1 || defaultSort(a,b);
+    const av = a[col] ?? 0, bv = b[col] ?? 0;
+    const cmp = typeof av==='string' ? av.localeCompare(bv) : bv - av;
+    return _statSort.dir * cmp;
+  });
+
+  // Playoff cutline index (top 16)
+  const CUT = 16;
+
+  // ── Clinching / Elimination math ──────────────────────────────────────────
+  const clinch = {}; // { teamCode: 'x' | 'e' }
+  if (rows.length > CUT) {
+    // games remaining per team (unplayed regular season)
+    const rem = {};
+    rows.forEach(t => {
+      rem[t.code] = state.games.filter(
+        g => !g.played && !g.playoff && (g.homeTeam === t.code || g.awayTeam === t.code)
+      ).length;
+    });
+    // max possible pts per team
+    const maxP = {};
+    rows.forEach(t => { maxP[t.code] = t.pts + rem[t.code] * 2; });
+
+    // sorted by default standings order (pts already sorted above)
+    const lastIn   = rows[CUT - 1]; // 16th — last playoff team
+    const firstOut = rows[CUT];     // 17th — best team outside
+
+    rows.forEach((t, i) => {
+      if (i < CUT) {
+        // Clinched: even the best outside team can't reach this team's pts
+        if (firstOut && t.pts > maxP[firstOut.code]) clinch[t.code] = 'x';
+      } else {
+        // Eliminated: winning everything still can't reach 16th's current pts
+        if (maxP[t.code] < lastIn.pts) clinch[t.code] = 'e';
+      }
+    });
+  }
+
+  // ── Column leader highlights ───────────────────────────────────────────────
+  const best = col => {
+    const asc = col === 'gaPerGp' || col === 'ga';
+    const vals = rows.map(r => r[col]).filter(v => typeof v==='number' && !isNaN(v));
+    return vals.length ? (asc ? Math.min(...vals) : Math.max(...vals)) : null;
+  };
+  const leaders = {};
+  ['w','rw','gf','ga','diff','pct','gfPerGp','gaPerGp'].forEach(c => leaders[c]=best(c));
+  const isLead = (col, val) => leaders[col]!=null && val===leaders[col];
+
+  // ── Render helpers ────────────────────────────────────────────────────────
+  const thSort = (col, label, tip='') => {
+    const active = _statSort.col === col;
+    const arrow  = active ? (_statSort.dir===-1 ? 'sort-desc' : 'sort-asc') : '';
+    return `<th class="ct-th-num ${arrow}" data-sort="${col}" title="${tip}">${label}</th>`;
+  };
+
+  const formDot = r => {
+    const cls = r==='W'?'form-w':r==='OTL'?'form-otl':'form-l';
+    return `<span class="form-dot ${cls}">${r==='OTL'?'O':r}</span>`;
+  };
+
+  const strkBadge = s => {
+    if (!s) return '—';
+    const cls = s.type==='W'?'streak-w':s.type==='OTL'?'streak-otl':'streak-l';
+    return `<span class="streak-badge ${cls}">${s.type}${s.count}</span>`;
+  };
+
+  const numCell = (col, val, display) => {
+    const gold = isLead(col, val) ? 'stat-leader' : '';
+    return `<td class="ct-td-num ${gold}">${display ?? val}</td>`;
+  };
+
+  const fmtDiff = d => `<span class="${d>0?'diff-pos':d<0?'diff-neg':''}">${d>0?'+':''}${d}</span>`;
+  const fmtPct  = p => p.toFixed(3).replace(/^0/,'');
+
+  // ── Table ─────────────────────────────────────────────────────────────────
   el_.innerHTML = `
     <div class="page-header">
       <h2>Standings</h2>
-      ${po ? `<button class="btn btn-accent btn-sm" onclick="navigate('playoffs')">View Playoffs ▶</button>` : ''}
+      ${po?`<button class="btn btn-accent btn-sm" onclick="navigate('playoffs')" style="display:flex;align-items:center;gap:6px"><img src="assets/ZamboniCupPlayoffs.png" style="width:18px;height:18px;object-fit:contain;border-radius:2px"> Zamboni Cup ▶</button>`:''}
     </div>
-
-    <div class="conf-standings">
-      <div class="conf-header">
-        <span class="conf-title">League Standings</span>
-        <span class="conf-sub">Top 16 advance to playoffs</span>
-      </div>
-      <table class="conf-table">
-        <thead>
-          <tr>
-            <th class="ct-th-rank">#</th>
-            <th class="ct-th-team">Team</th>
-            <th class="ct-th-num">GP</th>
-            <th class="ct-th-num">W</th>
-            <th class="ct-th-num">L</th>
-            <th class="ct-th-num">OT</th>
-            <th class="ct-th-pts">PTS</th>
-            <th class="ct-th-num">P%</th>
-            <th class="ct-th-num">RW</th>
-            <th class="ct-th-num">GF</th>
-            <th class="ct-th-num">GA</th>
-            <th class="ct-th-num">DIFF</th>
-          </tr>
-        </thead>
+    <div class="table-wrap mt-20">
+      <table class="stn-table">
+        <thead><tr>
+          <th class="ct-th-rank">#</th>
+          <th class="ct-th-team" style="text-align:left">Team</th>
+          ${thSort('gp',     'GP',     'Games played')}
+          ${thSort('w',      'W',      'Wins')}
+          <th class="ct-th-num">L</th>
+          <th class="ct-th-num">OTL</th>
+          ${thSort('pts',    'PTS',    'Points')}
+          ${thSort('pct',    'P%',     'Points percentage')}
+          ${thSort('rw',     'RW',     'Regulation wins')}
+          ${thSort('gf',     'GF',     'Goals for')}
+          ${thSort('ga',     'GA',     'Goals against')}
+          ${thSort('diff',   'DIFF',   'Goal differential')}
+          ${thSort('gfPerGp','GF/GP',  'Goals for per game')}
+          ${thSort('gaPerGp','GA/GP',  'Goals against per game')}
+          <th class="ct-th-num" title="Home record">HOME</th>
+          <th class="ct-th-num" title="Away record">AWAY</th>
+          <th title="Last 5 games" style="text-align:center">L5</th>
+          <th class="ct-th-num" title="Current streak">STK</th>
+        </tr></thead>
         <tbody>
-          ${all.map((t, i) => `
-            <tr class="ct-row${i < 16 ? ' ct-in' : ' ct-out'}${i === 15 ? ' ct-cutline' : ''}">
-              <td class="ct-td-rank">${i + 1}</td>
-              <td class="ct-td-team">
-                ${teamLogoLg(t.teamCode, 36)}
-                <div class="ct-team-info">
-                  <span class="ct-fullname">${t.teamName}</span>
-                  <span class="ct-mgr">${teamOwnerName(t.teamCode)}</span>
-                </div>
-              </td>
-              <td class="ct-td-num">${t.gp}</td>
-              <td class="ct-td-num">${t.w}</td>
-              <td class="ct-td-num">${t.l}</td>
-              <td class="ct-td-num">${t.ot}</td>
-              <td class="ct-td-pts">${t.pts}</td>
-              <td class="ct-td-num ct-pct">${pct(t)}</td>
-              <td class="ct-td-num">${t.rw}</td>
-              <td class="ct-td-num">${t.gf}</td>
-              <td class="ct-td-num">${t.ga}</td>
-              <td class="ct-td-num" style="color:${t.gf-t.ga>0?'var(--success)':t.gf-t.ga<0?'var(--danger)':'var(--text-muted)'}">${t.gf-t.ga>0?'+':''}${t.gf-t.ga}</td>
-            </tr>`).join('')}
+          ${rows.map((t,i) => {
+            const c = teamColor(t.code);
+            const inPo  = i < CUT;
+            const cutCls = i < CUT ? 'stn-in' : 'stn-out';
+            const lineRow = i === CUT-1 ? ' stn-cutline' : '';
+            return `
+              <tr class="ct-row ${cutCls}${lineRow}">
+                <td class="ct-td-rank">${i+1}</td>
+                <td class="ct-td-team">
+                  ${teamLogoLg(t.code, 34)}
+                  <div class="ct-team-info">
+                    <span class="ct-fullname" style="color:${c}">${t.code}</span>
+                    <span class="ct-mgr">${teamOwnerName(t.code)}</span>
+                  </div>
+                  ${clinch[t.code] === 'x' ? `<span class="clinch-badge clinch-x" title="Clinched playoff spot">X</span>` : ''}
+                  ${clinch[t.code] === 'e' ? `<span class="clinch-badge clinch-e" title="Eliminated">E</span>` : ''}
+                </td>
+                ${numCell('gp',     t.gp,      t.gp)}
+                ${numCell('w',      t.w,       t.w)}
+                <td class="ct-td-num">${t.l}</td>
+                <td class="ct-td-num">${t.ot}</td>
+                ${numCell('pts',    t.pts,     `<strong>${t.pts}</strong>`)}
+                ${numCell('pct',    t.pct,     fmtPct(t.pct))}
+                ${numCell('rw',     t.rw,      t.rw)}
+                ${numCell('gf',     t.gf,      t.gf)}
+                ${numCell('ga',     t.ga,      t.ga)}
+                ${numCell('diff',   t.diff,    fmtDiff(t.diff))}
+                ${numCell('gfPerGp',t.gfPerGp, t.gfPerGp.toFixed(2))}
+                ${numCell('gaPerGp',t.gaPerGp, t.gaPerGp.toFixed(2))}
+                <td class="ct-td-num stat-split">${t.homeRec}</td>
+                <td class="ct-td-num stat-split">${t.awayRec}</td>
+                <td class="stat-form">${t.last5.map(formDot).join('')}</td>
+                <td class="ct-td-num">${strkBadge(t.streak)}</td>
+              </tr>`;
+          }).join('')}
         </tbody>
       </table>
-    </div>
-  `;
+    </div>`;
+
+  // Sort on header click — re-render with new sort
+  el_.querySelectorAll('th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.sort;
+      _statSort.dir = (_statSort.col === col) ? _statSort.dir * -1 : -1;
+      _statSort.col = col;
+      renderStandings();
+    });
+  });
 }
 
 function renderPlayoffs() {
@@ -2002,11 +2332,19 @@ function renderPlayoffs() {
 
   if (!po?.rounds?.length) {
     el_.innerHTML = `
-      <div class="page-header"><h2>Playoffs</h2></div>
-      <div class="empty-state" style="padding:100px 0">
-        <span class="empty-icon">🏆</span>
-        <p>Playoffs have not started yet.</p>
-        <p class="text-dim text-sm mt-8">Complete the regular season to begin the playoff bracket.</p>
+      <div class="playoffs-wrap">
+        <div class="playoff-hero">
+          <img src="assets/ZamboniCupPlayoffs.png" class="playoff-hero-logo" alt="Zamboni Cup Playoffs">
+          <div class="playoff-hero-text">
+            <div class="playoff-hero-title">ZAMBONI CUP</div>
+            <div class="playoff-hero-sub">PLAYOFFS</div>
+          </div>
+        </div>
+        <div class="empty-state" style="padding:60px 0">
+          <p>Playoffs have not started yet.</p>
+          <p class="text-dim text-sm mt-8">Complete the regular season to begin the bracket.</p>
+          ${isAdmin ? `<button class="btn btn-accent mt-16" onclick="initPlayoffs()">🏒 Generate Bracket from Standings</button>` : ''}
+        </div>
       </div>`;
     return;
   }
@@ -2017,50 +2355,80 @@ function renderPlayoffs() {
   })();
 
   el_.innerHTML = `
-    <div class="page-header"><h2>Playoffs</h2></div>
+    <div class="playoffs-wrap">
 
-    ${champion ? `
-    <div class="champion-banner" style="margin-bottom:24px;font-size:1.1rem">
-      🏆 &nbsp;
-      ${teamLogoLg(champion, 40)}
-      <strong style="font-size:1.4rem;letter-spacing:1px">${champion}</strong>
-      <span style="color:var(--chrome-dim)">— ${teamOwnerName(champion)}</span>
-      <span style="margin-left:auto;font-size:.75rem;letter-spacing:3px;color:var(--gold)">CHAMPION</span>
-    </div>` : ''}
+      <div class="playoff-hero">
+        <img src="assets/ZamboniCupPlayoffs.png" class="playoff-hero-logo" alt="Zamboni Cup Playoffs">
+        <div class="playoff-hero-text">
+          <div class="playoff-hero-title">ZAMBONI CUP</div>
+          <div class="playoff-hero-sub">PLAYOFFS</div>
+        </div>
+      </div>
 
-    <div class="bracket-rounds">
+      ${champion ? `
+      <div class="champion-banner">
+        <span class="champion-label">🏆 ZAMBONI CUP CHAMPION</span>
+        <img src="assets/ZamboniCupPlayoffs.png" class="champion-cup-icon" alt="Zamboni Cup">
+        ${teamLogoLg(champion, 56)}
+        <div class="champion-info">
+          <div class="champion-team">${champion}</div>
+          <div class="champion-mgr">${teamOwnerName(champion)}</div>
+        </div>
+      </div>` : ''}
+
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:0 28px 12px">
+        <button class="btn btn-ghost btn-sm" onclick="navigate('schedule')" title="View playoff games in Schedule">📅 Schedule</button>
+        ${isAdmin ? `<button class="btn btn-ghost btn-sm" onclick="initPlayoffs()">↺ Regenerate from Standings</button>` : '<span></span>'}
+      </div>
+
+      <div class="bracket-rounds">
       ${po.rounds.map(round => `
         <div class="bracket-round">
           <div class="bracket-round-name">${round.name}</div>
-          ${round.series.map(s => {
+          ${round.series.length === 0
+            ? `<div style="color:var(--text-dim);font-size:.75rem;padding:12px 0;opacity:.5">TBD</div>`
+            : round.series.map(s => {
             const w = s.winner;
-            const winTo = s.winTo || 2;
+            const winTo = s.winTo || round.winTo || 2;
+            const s1 = s.seed1 ? `<span class="bracket-seed">${s.seed1}</span>` : '';
+            const s2 = s.seed2 ? `<span class="bracket-seed">${s.seed2}</span>` : '';
+            const ri = po.rounds.indexOf(round);
+            const si = round.series.indexOf(s);
             return `
             <div class="bracket-series">
               <div class="bracket-team ${w === s.team1 ? 'bracket-winner' : w ? 'bracket-loser' : ''}">
                 <div style="display:flex;align-items:center;gap:8px;flex:1">
-                  ${teamLogoLg(s.team1, 44)}
+                  ${s1}${teamLogoLg(s.team1, 36)}
                   <div>
-                    <div style="font-family:'Oswald';font-weight:700;font-size:.9rem;color:${w===s.team1?'#fff':'var(--chrome-bright)'}">${s.team1}</div>
+                    <div style="font-family:'Oswald';font-weight:700;font-size:.88rem;color:${w===s.team1?'#fff':'var(--chrome-bright)'}">${s.team1}</div>
                     <div class="bracket-manager">${teamOwnerName(s.team1)}</div>
                   </div>
                 </div>
-                <span class="bracket-wins">${s.wins1}</span>
+                <span class="bracket-wins ${w===s.team1?'bracket-wins-w':''}">${s.wins1}</span>
               </div>
               <div class="bracket-team ${w === s.team2 ? 'bracket-winner' : w ? 'bracket-loser' : ''}">
                 <div style="display:flex;align-items:center;gap:8px;flex:1">
-                  ${teamLogoLg(s.team2, 44)}
+                  ${s2}${teamLogoLg(s.team2, 36)}
                   <div>
-                    <div style="font-family:'Oswald';font-weight:700;font-size:.9rem;color:${w===s.team2?'#fff':'var(--chrome-bright)'}">${s.team2}</div>
+                    <div style="font-family:'Oswald';font-weight:700;font-size:.88rem;color:${w===s.team2?'#fff':'var(--chrome-bright)'}">${s.team2}</div>
                     <div class="bracket-manager">${teamOwnerName(s.team2)}</div>
                   </div>
                 </div>
-                <span class="bracket-wins">${s.wins2}</span>
+                <span class="bracket-wins ${w===s.team2?'bracket-wins-w':''}">${s.wins2}</span>
               </div>
-              ${!w ? `<div style="text-align:center;font-size:.62rem;color:var(--text-dim);padding:4px 8px;letter-spacing:1px">BEST OF ${winTo*2-1}</div>` : ''}
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:3px 10px 5px">
+                <span style="font-size:.58rem;color:var(--text-dim);letter-spacing:1px">BO${winTo*2-1}</span>
+                ${w
+                  ? `<span style="font-size:.6rem;color:var(--gold);letter-spacing:.5px;font-weight:700">${w} advances ✓</span>`
+                  : isAdmin
+                    ? `<button class="btn-po-game" onclick="enterPlayoffGame(${ri},${si})">+ Enter Game</button>`
+                    : `<span style="font-size:.58rem;color:var(--text-dim)">In progress</span>`
+                }
+              </div>
             </div>`;
           }).join('')}
         </div>`).join('')}
+    </div>
     </div>
   `;
 }
@@ -2434,6 +2802,213 @@ function simRegularSeason(weeks = 10, gpw = 3) {
   return games.length;
 }
 
+// ── Recalc bracket wins from real game scores ────────────────────
+function recalcPlayoffBracket() {
+  if (!state.playoffs?.rounds?.length) return;
+  const rounds = state.playoffs.rounds;
+
+  rounds.forEach((round, ri) => {
+    const winTo = round.winTo || 2;
+    const poWeek = 100 + ri;
+
+    round.series.forEach(s => {
+      if (!s.team1 || !s.team2) return;
+
+      // Count wins from ALL played playoff games between these two teams
+      const seriesGames = state.games.filter(g =>
+        g.playoff && g.played &&
+        ((g.homeTeam === s.team1 && g.awayTeam === s.team2) ||
+         (g.homeTeam === s.team2 && g.awayTeam === s.team1))
+      );
+
+      let w1 = 0, w2 = 0;
+      seriesGames.forEach(g => {
+        if (g.homeScore > g.awayScore) {
+          g.homeTeam === s.team1 ? w1++ : w2++;
+        } else {
+          g.awayTeam === s.team1 ? w1++ : w2++;
+        }
+      });
+
+      s.wins1 = w1;
+      s.wins2 = w2;
+      s.winner = w1 >= winTo ? s.team1 : w2 >= winTo ? s.team2 : null;
+
+      // Series still active — make sure there's an unplayed game stub waiting
+      if (!s.winner) {
+        const hasPending = state.games.some(g =>
+          g.playoff && !g.played &&
+          ((g.homeTeam === s.team1 && g.awayTeam === s.team2) ||
+           (g.homeTeam === s.team2 && g.awayTeam === s.team1))
+        );
+        if (!hasPending) {
+          const gameNum = w1 + w2 + 1;
+          state.games.push({
+            id: uid(), week: poWeek, game: gameNum,
+            homeTeam: s.team1, awayTeam: s.team2,
+            played: false, homeScore: 0, awayScore: 0, ot: false,
+            playoff: true, notes: `${round.name} – Game ${gameNum}`,
+          });
+        }
+      }
+    });
+
+    // Round complete → populate & generate game stubs for next round
+    const allDone = round.series.length > 0 && round.series.every(s => s.winner);
+    if (allDone && rounds[ri + 1] !== undefined) {
+      const nextRound = rounds[ri + 1];
+      const winners = round.series.map(s => s.winner);
+
+      if (!nextRound.series.length) {
+        // Re-seed: sort winners by their advancing seed (best remaining vs worst remaining)
+        const advancers = round.series.map(s => ({
+          team: s.winner,
+          seed: s.winner === s.team1 ? (s.seed1 || 99) : (s.seed2 || 99),
+        }));
+        advancers.sort((a, b) => a.seed - b.seed);
+        const n = advancers.length;
+        const nextSeries = [];
+        for (let i = 0; i < Math.floor(n / 2); i++) {
+          const t1 = advancers[i].team, t2 = advancers[n - 1 - i].team;
+          if (t1 && t2) nextSeries.push({
+            team1: t1, team2: t2, wins1: 0, wins2: 0, winner: null,
+            winTo: nextRound.winTo || 2,
+            seed1: advancers[i].seed, seed2: advancers[n - 1 - i].seed,
+          });
+        }
+        nextRound.series = nextSeries;
+
+        // Generate Game 1 stubs for next round so players can submit
+        const nextWeek = 100 + ri + 1;
+        nextSeries.forEach(s => {
+          state.games.push({
+            id: uid(), week: nextWeek, game: 1,
+            homeTeam: s.team1, awayTeam: s.team2,
+            played: false, homeScore: 0, awayScore: 0, ot: false,
+            playoff: true, notes: `${nextRound.name} – Game 1`,
+          });
+        });
+      }
+    }
+  });
+
+  saveState();
+}
+
+// ── Enter a real playoff game score ─────────────────────────────
+function enterPlayoffGame(ri, si) {
+  const round = state.playoffs?.rounds?.[ri];
+  const s = round?.series?.[si];
+  if (!s) return;
+
+  const winTo = s.winTo || round.winTo || 2;
+  const gameNum = (s.wins1 + s.wins2) + 1;
+
+  showModal(`Game ${gameNum} — ${s.team1} vs ${s.team2}`, `
+    <div style="text-align:center;font-size:.72rem;color:var(--text-dim);margin-bottom:14px;letter-spacing:1px">
+      ${round.name} · Best of ${winTo * 2 - 1} · ${s.wins1}–${s.wins2} in series
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 40px 1fr;gap:8px;align-items:center;margin-bottom:16px">
+      <div style="text-align:center">
+        <div style="font-weight:700;margin-bottom:6px">${teamBadge(s.team1)}</div>
+        <input type="number" id="po-score-1" value="0" min="0" max="20"
+          style="width:100%;text-align:center;font-size:1.6rem;font-weight:800;padding:8px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;color:#fff">
+      </div>
+      <div style="text-align:center;color:var(--text-dim);font-weight:700;font-size:1.2rem">–</div>
+      <div style="text-align:center">
+        <div style="font-weight:700;margin-bottom:6px">${teamBadge(s.team2)}</div>
+        <input type="number" id="po-score-2" value="0" min="0" max="20"
+          style="width:100%;text-align:center;font-size:1.6rem;font-weight:800;padding:8px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;color:#fff">
+      </div>
+    </div>
+    <div class="form-row" style="display:flex;align-items:center;gap:8px">
+      <input type="checkbox" id="po-ot" style="width:auto">
+      <label for="po-ot" style="text-transform:none">Overtime / Shootout</label>
+    </div>
+    <button id="modal-ok" class="btn btn-primary btn-block mt-12">Save Game Result</button>
+  `, () => {
+    const hs = +$('po-score-1').value, as_ = +$('po-score-2').value;
+    if (hs === as_) { toast('Scores cannot be tied', 'error'); return; }
+
+    state.games.push({
+      id: uid(),
+      week: 100 + ri,
+      game: gameNum,
+      homeTeam: s.team1,
+      awayTeam: s.team2,
+      homeScore: hs,
+      awayScore: as_,
+      ot: !!$('po-ot').checked,
+      played: true,
+      playoff: true,
+      notes: `${round.name} – Game ${gameNum}`,
+    });
+
+    recalcPlayoffBracket();
+    hideModal();
+    renderPlayoffs();
+    toast('Playoff game saved!', 'success');
+  });
+}
+
+function initPlayoffs() {
+  // Build real empty bracket seeded 1v16, 2v15 … from live standings
+  if (state.playoffs?.rounds?.length) {
+    if (!confirm('Playoffs bracket already exists. Regenerate from current standings? This will clear all existing playoff data.')) return;
+  }
+  const ps = calcStandings().slice(0, 16);
+  if (ps.length < 16) { toast('Need at least 16 teams in standings', 'error'); return; }
+
+  const fmt = state.playoffFormat?.length ? state.playoffFormat : [
+    { name: 'First Round',        winTo: 2 },
+    { name: 'Second Round',       winTo: 3 },
+    { name: 'Conference Finals',  winTo: 3 },
+    { name: 'Championship',       winTo: 4 },
+  ];
+
+  // Sequential seeding: 1v16, 2v15, 3v14, 4v13, 5v12, 6v11, 7v10, 8v9
+  const r1Series = [
+    [0,15],[1,14],[2,13],[3,12],[4,11],[5,10],[6,9],[7,8]
+  ].map(([a,b]) => ({
+    team1: ps[a].teamCode, team2: ps[b].teamCode,
+    wins1: 0, wins2: 0, winner: null,
+    winTo: fmt[0].winTo,
+    seed1: a + 1, seed2: b + 1,
+  }));
+
+  // Build rounds: only R1 is populated; subsequent rounds are empty shells
+  const rounds = fmt.map((r, ri) => ({
+    name: r.name,
+    winTo: r.winTo,
+    series: ri === 0 ? r1Series : [],
+  }));
+
+  // Remove any existing unplayed playoff games
+  state.games = state.games.filter(g => !(g.playoff && !g.played));
+
+  // Generate Game 1 stubs for R1 so players can submit via the normal flow
+  r1Series.forEach(s => {
+    state.games.push({
+      id: uid(), week: 100, game: 1,
+      homeTeam: s.team1, awayTeam: s.team2,
+      played: false, homeScore: 0, awayScore: 0, ot: false,
+      playoff: true, notes: `${rounds[0].name} – Game 1`,
+    });
+  });
+
+  state.playoffs = { rounds };
+
+  // Reset schedule team filter so playoff games are immediately visible
+  _scheduleFilter.team = '';
+
+  saveState();
+
+  const stubCount = r1Series.length;
+  console.log('[Playoffs] Generated', stubCount, 'R1 stubs. Total playoff games in state:', state.games.filter(g => g.playoff).length, state.games.filter(g => g.playoff));
+  toast(`Playoff bracket generated — ${stubCount} games added to Schedule ✓`, 'success');
+  renderPlayoffs();
+}
+
 function simPlayoffs() {
   // Top 16 → R1 Bo3 | Top 8 → R2 Bo5 | Top 4 → R3 Bo5 | Final Bo7
   const ps = calcStandings().slice(0, 16);
@@ -2529,6 +3104,321 @@ function posGroup(pos) {
   if (pos === 'G') return 'G';
   if (pos === 'D') return 'D';
   return 'F'; // C, L, R, LW, RW, W
+}
+
+// ── Zamboni API helpers ──────────────────────────────────────────────────────
+
+async function fetchZamboniData(path) {
+  try {
+    const r = await fetch(`/api/zamboni/${path}`);
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+async function _getZamboniPlayers() {
+  if (_zamboniPlayers) return _zamboniPlayers;
+  const data = await fetchZamboniData('players');
+  if (!data) { _zamboniPlayers = []; return _zamboniPlayers; }
+  // Zamboni returns array of objects with a 'gamertag' field, or plain strings
+  _zamboniPlayers = Array.isArray(data)
+    ? data.map(p => (typeof p === 'string' ? p : p.gamertag || p.name || '')).filter(Boolean)
+    : [];
+  return _zamboniPlayers;
+}
+
+// ── Zamboni shared helpers ───────────────────────────────────────────────────
+
+/** Format seconds as M:SS */
+const zbFmtToa = s => s != null ? `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}` : '—';
+/** Format penalty-minute seconds as M:SS */
+const zbFmtPim = s => s != null ? `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}` : '—';
+/** Dash for null/empty values */
+const zbDash   = v => (v != null && v !== '') ? v : '—';
+/** Proportional percentage (returns 50 when both zero) */
+const zbPct    = (a, b) => { const t=(a||0)+(b||0); return t ? Math.round((a||0)/t*100) : 50; };
+
+/** SVG donut chart with left and right arcs colored by team */
+function zbDonut(lVal, rVal, label, lColor, rColor) {
+  const lp = zbPct(lVal, rVal), rp = 100 - lp;
+  const r = 28, cx = 36, cy = 36, sw = 10;
+  const circ = 2 * Math.PI * r;
+  const lDash = circ * lp / 100, rDash = circ * rp / 100;
+  const lc = lColor || '#c0392b', rc = rColor || '#2c5f8a';
+  return `
+    <div class="zb-donut-block">
+      <svg width="72" height="72" viewBox="0 0 72 72">
+        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="${sw}"/>
+        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${lc}" stroke-width="${sw}"
+          stroke-dasharray="${lDash} ${circ}" stroke-linecap="butt"
+          transform="rotate(-90 ${cx} ${cy})"/>
+        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${rc}" stroke-width="${sw}"
+          stroke-dasharray="${rDash} ${circ}" stroke-linecap="butt"
+          stroke-dashoffset="${-lDash}"
+          transform="rotate(-90 ${cx} ${cy})"/>
+      </svg>
+      <div class="zb-donut-label">${label}</div>
+      <div class="zb-donut-pcts">
+        <span style="color:${lc}">${lp}%</span>
+        <span style="color:${rc}">${rp}%</span>
+      </div>
+    </div>`;
+}
+
+/**
+ * Render a full Zamboni box score card.
+ * lh / rh are Zamboni history entries; lMgr / rMgr are manager objects;
+ * lTeam / rTeam are NHL team codes; mgrRecord is { tag: 'W-L[-OTL]' }.
+ * Returns a <div class="zb-game-card"> string.
+ */
+function zbRenderCard(lh, rh, lMgr, rMgr, lTeam, rTeam) {
+  const lScore = lh.scor ?? 0;
+  const rScore = rh ? (rh.scor ?? 0) : (lh.opponent_score ?? '?');
+  const lWin   = lScore > rScore;
+  const rWin   = rScore > lScore;
+  const isOt   = !!(lh.otg > 0 || rh?.otg > 0);
+  const isDisc = !!(lh.disc || rh?.disc);
+
+  const dispDate = lh.created_at
+    ? new Date(lh.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })
+    : '';
+
+  // League records from the schedule — not Zamboni stats
+  const standings = calcStandings();
+  const lSt = standings.find(s => s.teamCode === lTeam);
+  const rSt = standings.find(s => s.teamCode === rTeam);
+  const fmtRec = st => st ? `${st.w}-${st.l}${st.ot ? '-'+st.ot : ''}` : '';
+  const lRec = fmtRec(lSt);
+  const rRec = fmtRec(rSt);
+
+  // Team colors for bars & donuts
+  const lColor = teamColor(lTeam);
+  const rColor = teamColor(rTeam);
+
+  // Proper NHL SVG logos via teamLogoLg
+  const lLogo = lTeam ? teamLogoLg(lTeam, 64) : '';
+  const rLogo = rTeam ? teamLogoLg(rTeam, 64) : '';
+
+  const statDefs = [
+    { label:'Goals',           l:lScore,                  r:rScore,                  lRaw:+lScore,    rRaw:+rScore },
+    { label:'Total Shots',     l:zbDash(lh.shts),         r:zbDash(rh?.shts),        lRaw:lh.shts,    rRaw:rh?.shts },
+    { label:'Hits',            l:zbDash(lh.hits),         r:zbDash(rh?.hits),        lRaw:lh.hits,    rRaw:rh?.hits },
+    { label:'Time on Attack',  l:zbFmtToa(lh.toa),        r:zbFmtToa(rh?.toa),       lRaw:lh.toa,     rRaw:rh?.toa },
+    { label:'Faceoffs Won',    l:zbDash(lh.fo),           r:zbDash(rh?.fo),          lRaw:lh.fo,      rRaw:rh?.fo },
+    { label:'Power Play',      l:`${zbDash(lh.ppg)}/${zbDash(lh.ppo)}`,
+                               r:`${zbDash(rh?.ppg)}/${zbDash(rh?.ppo)}`,            lRaw:lh.ppg,     rRaw:rh?.ppg },
+    { label:'Penalty Min',     l:zbFmtPim(lh.pims),       r:zbFmtPim(rh?.pims),      lRaw:lh.pims,    rRaw:rh?.pims, lowBetter:true },
+  ];
+
+  const statRows = statDefs.map(s => {
+    const ln = s.lRaw != null ? +s.lRaw : NaN;
+    const rn = s.rRaw != null ? +s.rRaw : NaN;
+    const lBetter = !isNaN(ln) && !isNaN(rn) && (s.lowBetter ? ln < rn : ln > rn);
+    const rBetter = !isNaN(ln) && !isNaN(rn) && (s.lowBetter ? rn < ln : rn > ln);
+    const barPct  = (!isNaN(ln) && !isNaN(rn) && (ln+rn)>0) ? Math.round(ln/(ln+rn)*100) : 50;
+    const lValStyle = lBetter ? `color:${lColor};font-weight:700` : '';
+    const rValStyle = rBetter ? `color:${rColor};font-weight:700` : '';
+    return `
+      <div class="zb-cmp-row">
+        <span class="zb-cmp-val" style="${lValStyle}">${s.l}</span>
+        <div class="zb-cmp-center">
+          <div class="zb-cmp-bar">
+            <div class="zb-cmp-bar-l" style="width:${barPct}%;background:${lColor}"></div>
+            <div class="zb-cmp-bar-r" style="width:${100-barPct}%;background:${rColor}"></div>
+          </div>
+          <span class="zb-cmp-label">${s.label}</span>
+        </div>
+        <span class="zb-cmp-val zb-cmp-val-r" style="${rValStyle}">${s.r}</span>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="zb-game-card">
+      <div class="zb-banner">
+
+        <div class="zb-banner-side" style="${lWin?`background:linear-gradient(90deg,${lColor}22 0%,transparent 100%)`:''}">
+          <div class="zb-banner-logo">${lLogo}</div>
+          <div class="zb-banner-info">
+            <div class="zb-banner-code" style="${lWin?`color:${lColor}`:''}">${lTeam}</div>
+            <div class="zb-banner-mgr">${lMgr?.name||''}</div>
+            <div class="zb-banner-rec">${lRec}</div>
+          </div>
+        </div>
+
+        <div class="zb-banner-center">
+          <div class="zb-banner-scores">
+            <span class="zb-banner-score" style="${lWin?`color:${lColor};text-shadow:0 0 20px ${lColor}55`:'color:rgba(255,255,255,.28)'}">${lScore}</span>
+            <div class="zb-banner-final-wrap">
+              <span class="zb-banner-final">FINAL${isOt?' · OT':''}${isDisc?' · <span class="zb-disc-badge">DISC</span>':''}</span>
+              <span class="zb-banner-date">${dispDate}</span>
+            </div>
+            <span class="zb-banner-score" style="${rWin?`color:${rColor};text-shadow:0 0 20px ${rColor}55`:'color:rgba(255,255,255,.28)'}">${rScore}</span>
+          </div>
+        </div>
+
+        <div class="zb-banner-side zb-banner-side-r" style="${rWin?`background:linear-gradient(270deg,${rColor}22 0%,transparent 100%)`:''}">
+          <div class="zb-banner-info zb-banner-info-r">
+            <div class="zb-banner-code" style="${rWin?`color:${rColor}`:''}">${rTeam}</div>
+            <div class="zb-banner-mgr">${rMgr?.name||''}</div>
+            <div class="zb-banner-rec">${rRec}</div>
+          </div>
+          <div class="zb-banner-logo">${rLogo}</div>
+        </div>
+
+      </div>
+      <div class="zb-donuts">
+        ${zbDonut(lh.shts, rh?.shts, 'Shots',    lColor, rColor)}
+        ${zbDonut(lh.toa,  rh?.toa,  'TOA',      lColor, rColor)}
+        ${zbDonut(lh.fo,   rh?.fo,   'Faceoffs', lColor, rColor)}
+      </div>
+      <div class="zb-compare">${statRows}</div>
+    </div>`;
+}
+
+/**
+ * Fetch + cache all tagged managers' Zamboni histories.
+ * Returns { tagMap, gameMap, mgrRecord } or null on failure.
+ *
+ * Three cache layers (fastest → slowest):
+ *  1. In-memory  (_zbCache)          — instant, lost on page reload
+ *  2. sessionStorage (_ZB_SS_KEY)    — survives section navigation, cleared on tab close
+ *  3. Zamboni API via Flask proxy    — one request per tagged manager, all parallel
+ */
+async function getZamboniData() {
+  // ── Layer 1: in-memory ─────────────────────────────────────────────────────
+  if (_zbCache && Date.now() - _zbCacheAt < _ZB_TTL) return _zbCache;
+
+  // ── Layer 2: sessionStorage ────────────────────────────────────────────────
+  try {
+    const raw = sessionStorage.getItem(_ZB_SS_KEY);
+    if (raw) {
+      const stored = JSON.parse(raw);
+      if (stored?.at && Date.now() - stored.at < _ZB_TTL) {
+        // Rehydrate Map from serialized array
+        _zbCache   = { tagMap: stored.tagMap, gameMap: new Map(stored.gameMapArr), mgrRecord: stored.mgrRecord };
+        _zbCacheAt = stored.at;
+        return _zbCache;
+      }
+    }
+  } catch { /* sessionStorage unavailable or corrupt — fall through */ }
+
+  // ── Layer 3: fetch from API ────────────────────────────────────────────────
+  const tagMap = {};
+  state.managers.forEach(m => { if (m.zamboniTag) tagMap[m.zamboniTag.toLowerCase()] = m; });
+  const tags = Object.keys(tagMap);
+  if (!tags.length) return null;
+
+  const results = await Promise.all(tags.map(tag => fetchZamboniData(`player/${tag}`)));
+
+  // Build game_id → { sides: {tag: histEntry}, created_at } map
+  const gameMap = new Map();
+  results.forEach((res, i) => {
+    if (!res?.history) return;
+    const myTag = tags[i];
+    const arr = [...(res.history.vs||[]), ...(res.history.so||[])];
+    arr.forEach(h => {
+      const oppTag = (h.opponent||'').toLowerCase();
+      if (!tagMap[oppTag]) return;
+      if (!gameMap.has(h.game_id)) gameMap.set(h.game_id, { sides:{}, created_at:'' });
+      const entry = gameMap.get(h.game_id);
+      entry.sides[myTag] = h;
+      if (h.created_at) entry.created_at = h.created_at;
+    });
+  });
+
+  // Per-manager season record from full history
+  const mgrRecord = {};
+  results.forEach((res, i) => {
+    const myTag = tags[i];
+    const arr = [...(res?.history?.vs||[]), ...(res?.history?.so||[])];
+    let w=0, l=0, otl=0;
+    arr.forEach(h => { if (h.wins) w++; else if (h.otl) otl++; else if (h.loss) l++; });
+    mgrRecord[myTag] = `${w}-${l}${otl?'-'+otl:''}`;
+  });
+
+  _zbCache   = { tagMap, gameMap, mgrRecord };
+  _zbCacheAt = Date.now();
+
+  // Persist to sessionStorage so the next box score click is instant
+  try {
+    sessionStorage.setItem(_ZB_SS_KEY, JSON.stringify({
+      at:         _zbCacheAt,
+      tagMap:     Object.fromEntries(Object.entries(tagMap).map(([k,v]) => [k, { id:v.id, name:v.name, zamboniTag:v.zamboniTag }])),
+      gameMapArr: [...gameMap.entries()],
+      mgrRecord,
+    }));
+  } catch { /* storage full or unavailable — in-memory cache is still warm */ }
+
+  return _zbCache;
+}
+
+/**
+ * Silently warm the Zamboni cache in the background.
+ * Call this when opening Scores or Schedule so data is ready before any click.
+ * Only fires a fetch if there are tagged managers and the cache is cold.
+ */
+function zbWarmCache() {
+  const hasTagged = state.managers?.some(m => m.zamboniTag);
+  if (!hasTagged) return;
+  const cacheWarm = _zbCache && Date.now() - _zbCacheAt < _ZB_TTL;
+  if (cacheWarm) return;
+  // Fire-and-forget — do not await, do not block rendering
+  getZamboniData().catch(() => {});
+}
+
+/**
+ * Show a box score modal for a league game.
+ * Fetches Zamboni data and matches by manager gamertags + score.
+ */
+async function showGameBoxScore(g) {
+  if (!g?.played) return;
+
+  const homeMgr = state.managers.find(m => m.id === state.teamOwners[g.homeTeam]);
+  const awayMgr = state.managers.find(m => m.id === state.teamOwners[g.awayTeam]);
+
+  $('modal-box').classList.add('modal-wide');
+  showModal('Box Score', '<div class="empty-state">Loading stats…</div>');
+
+  if (!homeMgr?.zamboniTag || !awayMgr?.zamboniTag) {
+    // One or both managers don't have a Zamboni tag — nothing to show
+    $('modal-box').classList.remove('modal-wide');
+    showModal(`${g.homeTeam} ${g.homeScore}–${g.awayScore} ${g.awayTeam}`,
+      '<div class="empty-state">Box score unavailable — managers not linked to Zamboni.</div>');
+    return;
+  }
+
+  const zbData = await getZamboniData();
+  if (!zbData) {
+    showModal('Box Score', '<div class="empty-state">Zamboni API unavailable.</div>');
+    return;
+  }
+
+  const hTag = homeMgr.zamboniTag.toLowerCase();
+  const aTag = awayMgr.zamboniTag.toLowerCase();
+  const gameDate = g.postedAt || g.playedAt || g.date || '';
+
+  // Find the Zamboni game with matching score, picking closest by date on ties
+  let bestMatch = null, bestDiff = Infinity;
+  for (const [, zbG] of zbData.gameMap) {
+    const hh = zbG.sides[hTag];
+    const ah = zbG.sides[aTag];
+    if (!hh || !ah) continue;
+    if ((hh.scor ?? 0) != g.homeScore || (ah.scor ?? 0) != g.awayScore) continue;
+    const diff = gameDate && zbG.created_at
+      ? Math.abs(new Date(gameDate) - new Date(zbG.created_at)) : Infinity;
+    if (diff < bestDiff) { bestDiff = diff; bestMatch = { hh, ah }; }
+  }
+
+  if (!bestMatch) {
+    $('modal-box').classList.remove('modal-wide');
+    showModal(`${g.homeTeam} ${g.homeScore}–${g.awayScore} ${g.awayTeam}`,
+      '<div class="empty-state">No matching Zamboni game found for this score.</div>');
+    return;
+  }
+
+  const html = zbRenderCard(bestMatch.hh, bestMatch.ah, homeMgr, awayMgr, g.homeTeam, g.awayTeam);
+  $('modal-body').innerHTML = `<div style="margin:-18px">${html}</div>`;
+  $('modal-title').textContent = `${g.homeTeam} vs ${g.awayTeam}`;
 }
 
 async function fetchNHLRosters({ silent = false } = {}) {
@@ -2688,238 +3578,175 @@ function viewSeasonModal(seasonId) {
 function renderSettings() {
   const el_ = $('section-settings');
   const sysData = normalizeSysDataFile(state.sysDataFile);
-  const assignedTeams = NHL_TEAMS
-    .filter(t => t.code !== 'UTI')
-    .map(t => {
-      const ownerId = state.teamOwners[t.code] || '';
-      const coOwnerId = state.teamCoOwners[t.code] || '';
-      return {
-        code: t.code,
-        ownerId,
-        coOwnerId,
-        ownerName: ownerId ? managerName(ownerId) : 'Unassigned',
-        coOwnerName: coOwnerId ? managerName(coOwnerId) : '',
-      };
-    });
-  const managerTeamCounts = state.managers.map((m) => ({
-    ...m,
-    primaryCount: assignedTeams.filter((team) => team.ownerId === m.id).length,
-    totalCount: assignedTeams.filter((team) => team.ownerId === m.id || team.coOwnerId === m.id).length,
-  }));
+  const unassignedCount = NHL_TEAMS
+    .filter(t => t.code !== 'UTI' && !state.teamOwners[t.code]).length;
 
-  el_.innerHTML = `
-    <div class="page-header"><h2>Settings</h2></div>
+  // ── MENU ──────────────────────────────────────────────────────
+  if (!_settingsSection) {
+    const menuItems = [
+      { id:'managers', icon:'👤', title:'Managers',
+        sub:`${state.managers.length} managers · ${unassignedCount} unassigned` },
+      { id:'league', icon:'🏒', title:'League',
+        sub:`${state.league.name||'NHL Legacy League'} · Season ${state.league.season||'—'}` },
+      { id:'seasons', icon:'📅', title:'Seasons',
+        sub:`Season ${state.currentSeason||1} · ${(state.seasons||[]).length} archived` },
+      ...(isAdmin ? [
+        { id:'discord',  icon:'💬', title:'Discord',        sub:'Bot control · channel settings' },
+        { id:'playoffs', icon:'🏆', title:'Playoff Format', sub:`${(state.playoffFormat||[]).length} rounds configured` },
+        { id:'sysdata',  icon:'💾', title:'SYS-DATA',       sub: sysData ? `${sysData.name} · ${formatBytes(sysData.size)}` : 'No file uploaded' },
+        { id:'rules',    icon:'📋', title:'League Rules',   sub:'Edit the rules page content' },
+        { id:'roster',   icon:'🗂️', title:'NHL Roster',     sub: state.players.length ? `${state.players.length} players loaded` : 'Not loaded' },
+        { id:'data',     icon:'📦', title:'Data',           sub:'Export · Import · Migrate · Reset' },
+      ] : []),
+    ];
+    el_.innerHTML = `
+      <div class="page-header"><h2>Settings</h2></div>
+      <div class="settings-menu-grid">
+        ${menuItems.map(m => `
+          <button class="settings-menu-card" data-sect="${m.id}">
+            <span class="settings-menu-icon">${m.icon}</span>
+            <div class="settings-menu-text">
+              <div class="settings-menu-title">${m.title}</div>
+              <div class="settings-menu-sub">${m.sub}</div>
+            </div>
+            <span class="settings-menu-arrow">›</span>
+          </button>`).join('')}
+      </div>`;
+    document.querySelectorAll('.settings-menu-card').forEach(btn =>
+      btn.addEventListener('click', () => { _settingsSection = btn.dataset.sect; renderSettings(); })
+    );
+    return;
+  }
 
-    <div class="settings-grid mt-20">
+  // ── SECTION TITLES ────────────────────────────────────────────
+  const TITLES = {
+    managers:'Managers', league:'League', seasons:'Seasons',
+    discord:'Discord', playoffs:'Playoff Format', sysdata:'SYS-DATA',
+    rules:'League Rules', roster:'NHL Roster Data', data:'Data',
+  };
+
+  // ── BUILD SECTION HTML ────────────────────────────────────────
+  let _html = '';
+
+  switch (_settingsSection) {
+
+    case 'managers': _html = `
+      <div class="card mgr-card-fullwidth">
+        <div class="mgr-topbar">
+          <div class="mgr-topbar-left">
+            <span class="card-title" style="margin-bottom:0">Managers</span>
+            <span class="mgr-topbar-meta">${state.managers.length} managers · ${unassignedCount} unassigned</span>
+          </div>
+          <div class="mgr-topbar-right">
+            <input class="mgr-search-input" id="mgr-search" placeholder="Search name or team…" autocomplete="off">
+            <select class="mgr-filter-sel" id="mgr-filter-status">
+              <option value="">All</option>
+              <option value="no-team">No team</option>
+              <option value="no-discord">No Discord</option>
+              <option value="no-zamboni">No Zamboni</option>
+            </select>
+          </div>
+        </div>
+        <div class="mgr-split">
+          <div class="mgr-list-col" id="mgr-list-col">
+            ${state.managers.map(m => {
+              const team = getManagerTeam(m.id);
+              return `
+              <button class="mgr-list-item" data-mid="${m.id}" aria-pressed="false">
+                <span class="manager-dot" style="background:${m.color||'#555'};display:inline-block"></span>
+                <span class="mgr-list-name">${m.name.replace(/</g,'&lt;')}</span>
+                <span class="mgr-list-team">${team||''}</span>
+                <span class="mgr-status-pip ${!!team?'pip-ok':'pip-off'}" title="${!!team?'Team assigned':'No team'}">T</span>
+                <span class="mgr-status-pip ${!!(m.discordId||m.discordUsername)?'pip-ok':'pip-off'}" title="${!!(m.discordId||m.discordUsername)?'Discord linked':'No Discord'}">D</span>
+                <span class="mgr-status-pip ${!!m.zamboniTag?'pip-ok':'pip-off'}" title="${!!m.zamboniTag?'Zamboni set':'No Zamboni'}">Z</span>
+              </button>`;
+            }).join('')}
+          </div>
+          <div class="mgr-detail-col" id="mgr-detail-col">
+            <div class="mgr-detail-empty" id="mgr-detail-empty">
+              <span class="mgr-detail-empty-icon">👤</span>
+              <p>Select a manager to ${isAdmin?'view or edit':'view'}</p>
+            </div>
+            <div class="mgr-detail-form hidden" id="mgr-detail-form">
+              <div class="mgr-detail-header">
+                <span class="manager-dot mgr-detail-dot" id="mgr-detail-dot" style="display:inline-block"></span>
+                <span class="mgr-detail-title" id="mgr-detail-title"></span>
+                ${isAdmin ? `<button class="btn btn-ghost btn-sm" id="mgr-detail-del" style="margin-left:auto" data-mid="">✕ Remove</button>` : ''}
+              </div>
+              <div class="mgr-detail-fields">
+                <div class="mgr-detail-group">
+                  <label class="mgr-detail-label">Display Name</label>
+                  ${isAdmin ? `<input class="mgr-detail-input" id="mgr-d-name" placeholder="Name">` : `<span id="mgr-d-name-ro" style="font-size:.85rem;font-weight:600"></span>`}
+                </div>
+                ${isAdmin ? `
+                <div class="mgr-detail-group">
+                  <label class="mgr-detail-label">Color</label>
+                  <div class="mgr-color-row">
+                    <input type="color" class="mgr-color-picker" id="mgr-d-color">
+                    <div class="mgr-color-swatches">
+                      ${MANAGER_COLORS.map(c=>`<button class="mgr-swatch" style="background:${c}" data-color="${c}" type="button"></button>`).join('')}
+                    </div>
+                  </div>
+                </div>` : ''}
+                <div class="mgr-detail-row-2col">
+                  <div class="mgr-detail-group">
+                    <label class="mgr-detail-label">Primary Team <span class="mgr-pip-inline pip-off" id="mgr-pip-team">T</span></label>
+                    ${isAdmin
+                      ? `<select class="mgr-detail-sel" id="mgr-d-team"><option value="">— None —</option>${NHL_TEAMS.filter(t=>t.code!=='UTI').map(t=>`<option value="${t.code}">${t.code}</option>`).join('')}</select>`
+                      : `<span class="text-sm" id="mgr-d-team-ro">—</span>`}
+                  </div>
+                  <div class="mgr-detail-group">
+                    <label class="mgr-detail-label">Co-Mgr of</label>
+                    ${isAdmin
+                      ? `<select class="mgr-detail-sel" id="mgr-d-coteam"><option value="">— None —</option>${NHL_TEAMS.filter(t=>t.code!=='UTI').map(t=>`<option value="${t.code}">${t.code}</option>`).join('')}</select>`
+                      : `<span class="text-sm" id="mgr-d-coteam-ro">—</span>`}
+                  </div>
+                </div>
+                <div class="mgr-detail-section-head">Discord <span class="mgr-pip-inline pip-off" id="mgr-pip-disc">D</span></div>
+                <div class="mgr-detail-row-2col">
+                  <div class="mgr-detail-group">
+                    <label class="mgr-detail-label">Discord ID <span class="mgr-field-hint">18-digit snowflake</span></label>
+                    ${isAdmin ? `<input class="mgr-detail-input" id="mgr-d-discordId" placeholder="345570333052370956">` : `<span class="text-xs" id="mgr-d-discordId-ro">—</span>`}
+                  </div>
+                  <div class="mgr-detail-group">
+                    <label class="mgr-detail-label">Username <span class="mgr-field-hint">future: OAuth</span></label>
+                    ${isAdmin ? `<input class="mgr-detail-input" id="mgr-d-discordUsername" placeholder="@tino45">` : `<span class="text-xs" id="mgr-d-discordUsername-ro">—</span>`}
+                  </div>
+                </div>
+                <div class="mgr-detail-section-head">Zamboni <span class="mgr-pip-inline pip-off" id="mgr-pip-zamb">Z</span></div>
+                <div class="mgr-detail-group">
+                  <label class="mgr-detail-label">RPCN Account</label>
+                  ${isAdmin
+                    ? `<div class="zamboni-wrap"><input type="text" class="mgr-detail-input" id="mgr-d-zamboniTag" placeholder="RPCN Account" autocomplete="off"><div class="zamboni-drop" id="zdrop-detail"></div></div>`
+                    : `<span class="text-xs" id="mgr-d-zamboniTag-ro">—</span>`}
+                </div>
+              </div>
+              ${isAdmin ? `
+              <div class="mgr-detail-actions">
+                <button class="btn btn-primary btn-sm" id="mgr-detail-save">Save Changes</button>
+                <span class="mgr-save-feedback hidden" id="mgr-save-feedback">✓ Saved</span>
+              </div>` : ''}
+            </div>
+          </div>
+        </div>
+        ${isAdmin ? `
+        <div class="mgr-footer-row">
+          <input id="new-manager-name" placeholder="New manager name…">
+          <button class="btn btn-ghost btn-sm" id="add-manager-btn">+ Add</button>
+        </div>` : ''}
+      </div>`; break;
+
+    case 'league': _html = `
       <div class="card">
-        <div class="card-title">League Info</div>
         <div class="form-row"><label>League Name</label><input id="set-league-name" value="${state.league.name}" ${isAdmin?'':'readonly'}></div>
         <div class="form-row"><label>Season</label><input id="set-season" value="${state.league.season||''}" placeholder="e.g. 2024-25" ${isAdmin?'':'readonly'}></div>
         ${isAdmin ? `
           <div class="form-row"><label>Admin Password</label><input type="password" id="set-admin-pw" placeholder="Set new password"></div>
           <button class="btn btn-primary" id="save-league-btn">Save</button>` : ''}
-      </div>
+      </div>`; break;
 
+    case 'seasons': _html = `
       <div class="card">
-        <div class="card-title">Managers</div>
-        <p class="text-xs text-muted mb-12">Manage owners here, then assign teams below. Counts update automatically so you can spot imbalances faster.</p>
-        <ul class="manager-list" id="manager-list">
-          ${managerTeamCounts.map(m => `
-            <li class="manager-item">
-              <span class="manager-dot" style="background:${m.color}"></span>
-              <div class="manager-meta">
-                <span class="manager-name">${m.name}</span>
-                <span class="manager-subline">${m.primaryCount} primary · ${m.totalCount} total teams</span>
-              </div>
-              ${isAdmin ? `<button class="btn btn-ghost btn-sm del-manager-btn" data-mid="${m.id}">✕</button>` : ''}
-            </li>`).join('') || '<li class="text-dim text-sm" style="padding:8px 0">No managers added</li>'}
-        </ul>
-        ${isAdmin ? `
-          <div class="flex gap-8 mt-8">
-            <input id="new-manager-name" placeholder="Manager name" style="flex:1">
-            <button class="btn btn-primary" id="add-manager-btn">Add</button>
-          </div>` : ''}
-      </div>
-
-      <div class="card">
-        <div class="card-title">Team Assignments</div>
-        <p class="text-xs text-muted mb-12">Assign NHL teams to managers. Primary owner and optional co-manager stay visible together so the full league map is easier to scan.</p>
-        <div class="team-assign-grid">
-          ${assignedTeams.map((team) => `
-            <div class="team-assign-item">
-              <div class="team-assign-header">
-                <label>${team.code}</label>
-                <span class="team-assign-summary">${team.ownerName}${team.coOwnerName ? ` + ${team.coOwnerName}` : ''}</span>
-              </div>
-              <select class="team-owner-select" data-code="${team.code}" ${isAdmin?'':'disabled'}>
-                <option value="">— None —</option>
-                ${state.managers.map(m => `<option value="${m.id}" ${team.ownerId===m.id?'selected':''}>${m.name}</option>`).join('')}
-              </select>
-              <select class="team-coowner-select" data-code="${team.code}" ${isAdmin?'':'disabled'} title="Co-Manager (optional)">
-                <option value="">— Co-Mgr —</option>
-                ${state.managers.map(m => `<option value="${m.id}" ${team.coOwnerId===m.id?'selected':''}>${m.name}</option>`).join('')}
-              </select>
-            </div>`).join('')}
-        </div>
-        ${isAdmin ? `<button class="btn btn-primary mt-12" id="save-assignments-btn">Save Assignments</button>` : ''}
-      </div>
-
-      ${isAdmin ? `
-        <div class="card">
-          <div class="card-title">SYS-DATA Distribution</div>
-          <p class="text-xs text-muted mb-12">Upload the SYS-DATA file here. All league members can download it directly from the dashboard — no sharing links needed.</p>
-          ${sysData ? `
-            <div class="flex items-center gap-12 mb-12" style="background:rgba(74,140,200,.06);border:1px solid var(--border);border-radius:6px;padding:10px 14px">
-              <div style="flex:1">
-                <div class="text-sm font-bold">${sysData.name}</div>
-                <div class="text-xs text-dim mt-4">${formatBytes(sysData.size)} · Uploaded ${fmtDate(sysData.uploadedAt)}</div>
-              </div>
-              <button class="btn btn-ghost btn-sm" id="dl-sysdata-settings-btn">⬇ Preview</button>
-              <button class="btn btn-danger btn-sm" id="clear-sysdata-btn">Remove</button>
-            </div>
-            <div class="flex items-center gap-10 mb-12">
-              <label class="text-xs text-muted" style="white-space:nowrap">Week shown on dashboard:</label>
-              <input type="number" id="sysdata-week-input" min="1" max="82" placeholder="Week #"
-                value="${sysData.week || ''}"
-                style="width:72px;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem;text-align:center">
-              <button class="btn btn-ghost btn-sm" id="save-sysdata-week-btn">Save</button>
-            </div>` : `
-            <div class="flex items-center gap-10 mb-12">
-              <label class="text-xs text-muted" style="white-space:nowrap">Week # for this file:</label>
-              <input type="number" id="sysdata-week-input" min="1" max="82" placeholder="e.g. 14"
-                style="width:72px;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem;text-align:center">
-            </div>`}
-          <input type="file" id="sysdata-file-input" style="display:none" accept="*/*">
-          <button class="btn btn-primary" id="upload-sysdata-btn">${sysData ? 'Replace File' : 'Upload SYS-DATA'}</button>
-        </div>
-  
-        <div class="card">
-          <div class="card-title">League Rules</div>
-          <p class="text-xs text-muted mb-12">Edit the league rules displayed in the Rules section. Use <strong>## Section Title</strong> for sections, <strong>### Sub-heading</strong> for sub-sections, <strong>**bold**</strong> for emphasis, and <strong>- item</strong> for bullet lists.</p>
-          <textarea id="rules-editor" style="width:100%;height:260px;font-size:.78rem;font-family:monospace;resize:vertical">${(state.rules ?? DEFAULT_RULES).replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
-          <div style="display:flex;gap:8px;margin-top:8px">
-            <button class="btn btn-primary" id="save-rules-btn">Save Rules</button>
-            <button class="btn btn-ghost btn-sm" id="reset-rules-btn">Reset to Default</button>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-title">NHL Roster Data</div>
-          <div class="flex items-center gap-12" style="margin-bottom:10px">
-            <span class="text-sm ${state.players.length ? 'text-success' : 'text-muted'}">
-              ${state.players.length ? `✓ ${state.players.length} players loaded` : '⏳ Loading from NHL.com…'}
-            </span>
-            <button class="btn btn-ghost btn-sm" id="fetch-nhl-btn">Refresh Roster</button>
-          </div>
-          <p class="text-xs text-dim">Player data is fetched automatically from NHL.com on startup and refreshed monthly.</p>
-        </div>
-
-        <div class="card">
-          <div class="card-title">Playoff Format</div>
-          <p class="text-xs text-muted mb-12">Set the series length for each playoff round. Configure before the season starts.</p>
-          <div id="playoff-format-rows">
-            ${(state.playoffFormat || []).map((r, i) => `
-              <div class="pf-row" data-idx="${i}">
-                <span class="pf-round-num">${i + 1}</span>
-                <input type="text" class="pf-name-input" value="${r.name}" placeholder="Round name"
-                  style="flex:1;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem">
-                <select class="pf-bo-select" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem">
-                  ${[3,5,7].map(n => `<option value="${Math.ceil(n/2)}" ${r.winTo===Math.ceil(n/2)?'selected':''}>Bo${n}</option>`).join('')}
-                </select>
-                <button class="btn btn-ghost btn-sm pf-del-btn" data-idx="${i}" style="padding:4px 8px;font-size:.75rem">✕</button>
-              </div>`).join('')}
-          </div>
-          <div style="display:flex;gap:8px;margin-top:10px">
-            <button class="btn btn-ghost btn-sm" id="pf-add-btn">+ Add Round</button>
-            <button class="btn btn-primary btn-sm" id="pf-save-btn">Save Format</button>
-          </div>
-        </div>
-
-        ${isAdmin ? `
-        <div class="card" id="bot-control-card">
-          <div class="card-title" style="display:flex;align-items:center;gap:8px">
-            🤖 Discord Bot
-            <span id="bot-status-dot" style="width:8px;height:8px;border-radius:50%;background:var(--text-dim);display:inline-block"></span>
-            <span id="bot-status-label" style="font-size:.72rem;color:var(--text-dim);font-weight:400">Checking…</span>
-          </div>
-          <p class="text-xs text-muted mb-12">Start or stop the Discord bot directly from here. No server access needed.</p>
-          <div style="display:flex;gap:8px;align-items:center">
-            <button class="btn btn-primary btn-sm" id="bot-start-btn">▶ Start Bot</button>
-            <button class="btn btn-danger btn-sm" id="bot-stop-btn">■ Stop Bot</button>
-            <button class="btn btn-ghost btn-sm" id="bot-refresh-btn" title="Refresh status">↺</button>
-          </div>
-          <div id="bot-log" style="margin-top:10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:monospace;font-size:.68rem;color:var(--text-dim);max-height:160px;overflow-y:auto;white-space:pre-wrap;display:none"></div>
-        </div>
-
-        <div class="card" id="discord-channels-card">
-          <div class="card-title">📢 Discord Channels</div>
-          <p class="text-xs text-muted mb-12">
-            Right-click any channel in Discord → <strong>Copy Channel ID</strong> (requires Developer Mode in Discord settings).
-            Leave blank to disable that notification.
-          </p>
-          <div class="form-row">
-            <label>🏒 Scores Channel ID</label>
-            <input id="dc-scores" placeholder="e.g. 1363924034609217618" value="${(state.discordConfig||{}).scoresChannel||''}">
-          </div>
-          <div class="form-row">
-            <label>🔄 Trades Channel ID</label>
-            <input id="dc-trades" placeholder="e.g. 1363924034609217619" value="${(state.discordConfig||{}).tradesChannel||''}">
-          </div>
-          <div class="form-row">
-            <label>📥 Pending / Approvals Channel ID <span class="text-dim" style="font-size:.7rem;font-weight:400">(optional — alternative to admin DMs)</span></label>
-            <input id="dc-pending" placeholder="e.g. 1363924034609217620" value="${(state.discordConfig||{}).pendingChannel||''}">
-          </div>
-          <div class="form-row" style="align-items:center;gap:10px">
-            <label style="margin:0">DM admins for approvals</label>
-            <input type="checkbox" id="dc-admindm" ${(state.discordConfig||{}).adminDm !== false ? 'checked' : ''} style="width:auto;accent-color:var(--primary)">
-            <span class="text-xs text-dim">When checked, each admin gets a DM with Approve/Reject buttons</span>
-          </div>
-          <button class="btn btn-primary mt-12" id="save-discord-cfg-btn">Save Discord Settings</button>
-        </div>` : ''}
-
-        <div class="card">
-          <div class="card-title">Data</div>
-          ${isAdmin ? `
-          <div class="card mb-12" style="background:rgba(200,168,78,.06);border-color:var(--gold)">
-            <div class="text-xs text-muted mb-6" style="letter-spacing:1px;text-transform:uppercase">Server Sync</div>
-            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-              <span id="api-status-badge" class="text-xs" style="color:${_apiAvailable ? 'var(--success)' : 'var(--text-muted)'}">
-                ${_apiAvailable ? '✓ Connected to server' : '○ Using local storage only'}
-              </span>
-              <button class="btn btn-sm ${_apiAvailable ? 'btn-ghost' : 'btn-primary'}" id="migrate-server-btn">
-                ${_apiAvailable ? '↑ Push to Server' : '↑ Migrate to Server'}
-              </button>
-            </div>
-            <p class="text-xs text-dim mt-6">Pushes all local data to the SQLite backend. Required once before the Discord bot can see league data.</p>
-          </div>` : ''}
-          <div class="flex gap-8 flex-wrap">
-            <button class="btn btn-secondary" id="export-btn">Export League JSON</button>
-            <button class="btn btn-secondary" id="import-btn-show">Import League JSON</button>
-            <button class="btn btn-danger" id="reset-btn">Reset League</button>
-          </div>
-          <div id="import-area" class="hidden mt-12">
-            <textarea id="import-json" placeholder="Paste JSON here…" style="width:100%;height:120px;font-size:.75rem"></textarea>
-            <button class="btn btn-primary mt-8" id="import-confirm-btn">Import</button>
-          </div>
-          <div class="divider"></div>
-          <details class="advanced-settings-card mb-12">
-            <summary class="advanced-settings-summary">Advanced Settings</summary>
-            <div class="advanced-settings-body">
-              <p class="text-xs text-muted mb-12">Danger zone actions for testing or full-league resets. Keep this away from normal day-to-day admin work.</p>
-              <div class="advanced-setting-item">
-                <div>
-                  <div style="font-weight:700">Simulate Full Season</div>
-                  <div class="text-xs text-muted mt-4">Generates a complete simulated season: snake draft, 10-week schedule, and playoffs. Replaces existing draft, schedule, and playoff data.</div>
-                </div>
-                <button class="btn btn-danger" id="simulate-season-btn">Simulate Full Season</button>
-              </div>
-            </div>
-          </details>
-          <div class="text-xs text-dim">Admin logout: <button class="btn btn-ghost btn-sm" id="admin-logout-btn">Logout</button></div>
-        </div>` : ''}
-
-      <!-- Season History — always visible -->
-      <div class="card" style="grid-column: 1 / -1">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
           <span>Season History</span>
           ${isAdmin ? `
@@ -2960,320 +3787,666 @@ function renderSettings() {
             }).join('')}
           </div>
         `}
+      </div>`; break;
+
+    case 'discord': _html = isAdmin ? `
+      <div class="card" id="bot-control-card">
+        <div class="card-title" style="display:flex;align-items:center;gap:8px">
+          🤖 Discord Bot
+          <span id="bot-status-dot" style="width:8px;height:8px;border-radius:50%;background:var(--text-dim);display:inline-block"></span>
+          <span id="bot-status-label" style="font-size:.72rem;color:var(--text-dim);font-weight:400">Checking…</span>
+        </div>
+        <p class="text-xs text-muted mb-12">Start or stop the Discord bot directly from here. No server access needed.</p>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-primary btn-sm" id="bot-start-btn">▶ Start Bot</button>
+          <button class="btn btn-danger btn-sm" id="bot-stop-btn">■ Stop Bot</button>
+          <button class="btn btn-ghost btn-sm" id="bot-refresh-btn" title="Refresh status">↺</button>
+        </div>
+        <div id="bot-log" style="margin-top:10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:monospace;font-size:.68rem;color:var(--text-dim);max-height:160px;overflow-y:auto;white-space:pre-wrap;display:none"></div>
       </div>
+      <div class="card" id="discord-channels-card">
+        <div class="card-title">📢 Discord Channels</div>
+        <p class="text-xs text-muted mb-12">
+          Right-click any channel in Discord → <strong>Copy Channel ID</strong> (requires Developer Mode).
+          Leave blank to disable that notification.
+        </p>
+        <div class="form-row">
+          <label>🏒 Scores Channel ID</label>
+          <input id="dc-scores" placeholder="e.g. 1363924034609217618" value="${(state.discordConfig||{}).scoresChannel||''}">
+        </div>
+        <div class="form-row">
+          <label>🔄 Trades Channel ID</label>
+          <input id="dc-trades" placeholder="e.g. 1363924034609217619" value="${(state.discordConfig||{}).tradesChannel||''}">
+        </div>
+        <div class="form-row">
+          <label>📥 Pending / Approvals Channel ID <span class="text-dim" style="font-size:.7rem;font-weight:400">(optional — alternative to admin DMs)</span></label>
+          <input id="dc-pending" placeholder="e.g. 1363924034609217620" value="${(state.discordConfig||{}).pendingChannel||''}">
+        </div>
+        <div class="form-row" style="align-items:center;gap:10px">
+          <label style="margin:0">DM admins for approvals</label>
+          <input type="checkbox" id="dc-admindm" ${(state.discordConfig||{}).adminDm !== false ? 'checked' : ''} style="width:auto;accent-color:var(--primary)">
+          <span class="text-xs text-dim">When checked, each admin gets a DM with Approve/Reject buttons</span>
+        </div>
+        <button class="btn btn-primary mt-12" id="save-discord-cfg-btn">Save Discord Settings</button>
+      </div>` : '<div class="empty-state">Admin access required.</div>'; break;
 
-    </div>
-  `;
+    case 'playoffs': _html = isAdmin ? `
+      <div class="card">
+        <div class="card-title">Playoff Format</div>
+        <p class="text-xs text-muted mb-12">Set the series length for each playoff round. Configure before the season starts.</p>
+        <div id="playoff-format-rows">
+          ${(state.playoffFormat || []).map((r, i) => `
+            <div class="pf-row" data-idx="${i}">
+              <span class="pf-round-num">${i + 1}</span>
+              <input type="text" class="pf-name-input" value="${r.name}" placeholder="Round name"
+                style="flex:1;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem">
+              <select class="pf-bo-select" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem">
+                ${[3,5,7].map(n => `<option value="${Math.ceil(n/2)}" ${r.winTo===Math.ceil(n/2)?'selected':''}>Bo${n}</option>`).join('')}
+              </select>
+              <button class="btn btn-ghost btn-sm pf-del-btn" data-idx="${i}" style="padding:4px 8px;font-size:.75rem">✕</button>
+            </div>`).join('')}
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn btn-ghost btn-sm" id="pf-add-btn">+ Add Round</button>
+          <button class="btn btn-primary btn-sm" id="pf-save-btn">Save Format</button>
+        </div>
+      </div>` : '<div class="empty-state">Admin access required.</div>'; break;
 
-  $('save-league-btn')?.addEventListener('click', () => {
-    state.league.name = $('set-league-name').value;
-    state.league.season = $('set-season').value;
-    const newPw = $('set-admin-pw')?.value?.trim() || '';
-    const saveLeague = async () => {
-      saveState();
-      $('league-title').textContent = state.league.name;
-      renderSettings();
-      toast('League settings saved', 'success');
-    };
-    if (!newPw) {
-      saveLeague();
-      return;
-    }
-    _apiFetch('/api/auth/password', {
-      method: 'POST',
-      body: JSON.stringify({ password: newPw }),
-    })
-      .then(async r => {
-        const body = await r.json().catch(() => ({}));
-        if (!r.ok || !body.ok) {
-          if (r.status === 401) clearAdminSession({ rerender: true });
-          toast(body.error || 'Password update failed', 'error');
-          return;
+    case 'sysdata': _html = isAdmin ? `
+      <div class="card">
+        <div class="card-title">SYS-DATA Distribution</div>
+        <p class="text-xs text-muted mb-12">Upload the SYS-DATA file here. All league members can download it directly from the dashboard — no sharing links needed.</p>
+        ${sysData ? `
+          <div class="flex items-center gap-12 mb-12" style="background:rgba(74,140,200,.06);border:1px solid var(--border);border-radius:6px;padding:10px 14px">
+            <div style="flex:1">
+              <div class="text-sm font-bold">${sysData.name}</div>
+              <div class="text-xs text-dim mt-4">${formatBytes(sysData.size)} · Uploaded ${fmtDate(sysData.uploadedAt)}</div>
+            </div>
+            <button class="btn btn-ghost btn-sm" id="dl-sysdata-settings-btn">⬇ Preview</button>
+            <button class="btn btn-danger btn-sm" id="clear-sysdata-btn">Remove</button>
+          </div>
+          <div class="flex items-center gap-10 mb-12">
+            <label class="text-xs text-muted" style="white-space:nowrap">Week shown on dashboard:</label>
+            <input type="number" id="sysdata-week-input" min="1" max="82" placeholder="Week #"
+              value="${sysData.week || ''}"
+              style="width:72px;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem;text-align:center">
+            <button class="btn btn-ghost btn-sm" id="save-sysdata-week-btn">Save</button>
+          </div>` : `
+          <div class="flex items-center gap-10 mb-12">
+            <label class="text-xs text-muted" style="white-space:nowrap">Week # for this file:</label>
+            <input type="number" id="sysdata-week-input" min="1" max="82" placeholder="e.g. 14"
+              style="width:72px;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem;text-align:center">
+          </div>`}
+        <input type="file" id="sysdata-file-input" style="display:none" accept="*/*">
+        <button class="btn btn-primary" id="upload-sysdata-btn">${sysData ? 'Replace File' : 'Upload SYS-DATA'}</button>
+      </div>` : '<div class="empty-state">Admin access required.</div>'; break;
+
+    case 'rules': _html = isAdmin ? `
+      <div class="card">
+        <div class="card-title">League Rules</div>
+        <p class="text-xs text-muted mb-12">Use <strong>## Section Title</strong> for sections, <strong>### Sub-heading</strong> for sub-sections, <strong>**bold**</strong> for emphasis, and <strong>- item</strong> for bullet lists.</p>
+        <textarea id="rules-editor" style="width:100%;height:340px;font-size:.78rem;font-family:monospace;resize:vertical">${(state.rules ?? DEFAULT_RULES).replace(/</g,'&lt;').replace(/>/g,'&gt;')}</textarea>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn btn-primary" id="save-rules-btn">Save Rules</button>
+          <button class="btn btn-ghost btn-sm" id="reset-rules-btn">Reset to Default</button>
+        </div>
+      </div>` : '<div class="empty-state">Admin access required.</div>'; break;
+
+    case 'roster': _html = `
+      <div class="card">
+        <div class="card-title">NHL Roster Data</div>
+        <div class="flex items-center gap-12" style="margin-bottom:10px">
+          <span class="text-sm ${state.players.length ? 'text-success' : 'text-muted'}">
+            ${state.players.length ? `✓ ${state.players.length} players loaded` : '⏳ Loading from NHL.com…'}
+          </span>
+          <button class="btn btn-ghost btn-sm" id="fetch-nhl-btn">Refresh Roster</button>
+        </div>
+        <p class="text-xs text-dim">Player data is fetched automatically from NHL.com on startup and refreshed monthly.</p>
+      </div>`; break;
+
+    case 'data': _html = `
+      ${isAdmin ? `
+      <div class="card">
+        <div class="card-title">Server Sync</div>
+        <div class="flex items-center gap-12" style="flex-wrap:wrap;margin-bottom:8px">
+          <span id="api-status-badge" class="text-xs" style="color:${_apiAvailable ? 'var(--success)' : 'var(--text-muted)'}">
+            ${_apiAvailable ? '✓ Connected to server' : '○ Using local storage only'}
+          </span>
+          <button class="btn btn-sm ${_apiAvailable ? 'btn-ghost' : 'btn-primary'}" id="migrate-server-btn">
+            ${_apiAvailable ? '↑ Push to Server' : '↑ Migrate to Server'}
+          </button>
+        </div>
+        <p class="text-xs text-dim mt-4">Pushes all local data to the SQLite backend. Required once before the Discord bot can see league data.</p>
+      </div>` : ''}
+      <div class="card">
+        <div class="card-title">Import / Export</div>
+        <div class="flex gap-8 flex-wrap">
+          <button class="btn btn-secondary" id="export-btn">Export League JSON</button>
+          <button class="btn btn-secondary" id="import-btn-show">Import League JSON</button>
+        </div>
+        <div id="import-area" class="hidden mt-12">
+          <div class="flex gap-8 flex-wrap mb-8">
+            <label class="btn btn-secondary" style="cursor:pointer">
+              Upload JSON File
+              <input type="file" id="import-file-input" accept=".json,application/json" style="display:none">
+            </label>
+            <span id="import-file-name" class="text-xs text-muted" style="align-self:center"></span>
+          </div>
+          <textarea id="import-json" placeholder="Paste JSON here, or upload a file above…" style="width:100%;height:120px;font-size:.75rem"></textarea>
+          <button class="btn btn-primary mt-8" id="import-confirm-btn">Import</button>
+        </div>
+      </div>
+      ${isAdmin ? `
+      <div class="card">
+        <div class="card-title">Danger Zone</div>
+        <details class="advanced-settings-card mb-12">
+          <summary class="advanced-settings-summary">Advanced Settings</summary>
+          <div class="advanced-settings-body">
+            <p class="text-xs text-muted mb-12">Danger zone actions for testing or full-league resets. Keep this away from normal day-to-day admin work.</p>
+            <div class="advanced-setting-item">
+              <div>
+                <div style="font-weight:700">Simulate Full Season</div>
+                <div class="text-xs text-muted mt-4">Generates a complete simulated season: snake draft, 10-week schedule, and playoffs. Replaces existing draft, schedule, and playoff data.</div>
+              </div>
+              <button class="btn btn-danger" id="simulate-season-btn">Simulate Full Season</button>
+            </div>
+          </div>
+        </details>
+        <div class="flex gap-8 flex-wrap mb-12">
+          <button class="btn btn-danger" id="reset-btn">Reset League</button>
+        </div>
+        <div class="text-xs text-dim">Admin: <button class="btn btn-ghost btn-sm" id="admin-logout-btn">Logout</button></div>
+      </div>` : ''}
+    `; break;
+
+    default: _html = '<div class="empty-state">Unknown section.</div>';
+  }
+
+  el_.innerHTML = `
+    <div class="settings-section-page">
+      <div class="settings-back-bar">
+        <button class="settings-back-btn" id="settings-back">‹ Settings</button>
+        <span class="settings-section-heading">${TITLES[_settingsSection] || _settingsSection}</span>
+      </div>
+      <div class="settings-section-body">${_html}</div>
+    </div>`;
+
+  $('settings-back').addEventListener('click', () => {
+    _settingsSection = null;
+    renderSettings();
+  });
+
+  // ── Section event handlers ─────────────────────────────────────
+  switch (_settingsSection) {
+
+    case 'managers': {
+      function _mgrPip(id, ok) {
+        const el = $(id);
+        if (!el) return;
+        el.className = `mgr-pip-inline ${ok ? 'pip-ok' : 'pip-off'}`;
+      }
+      function _updateMgrListItem(mid) {
+        const btn = document.querySelector(`.mgr-list-item[data-mid="${CSS.escape(mid)}"]`);
+        if (!btn) return;
+        const mgr = state.managers.find(m => m.id === mid);
+        if (!mgr) return;
+        const team = getManagerTeam(mid);
+        const dot  = btn.querySelector('.manager-dot');
+        if (dot) dot.style.background = mgr.color || '#555';
+        const nm = btn.querySelector('.mgr-list-name');
+        if (nm) nm.textContent = mgr.name;
+        const tm = btn.querySelector('.mgr-list-team');
+        if (tm) tm.textContent = team || '';
+        const pips = btn.querySelectorAll('.mgr-status-pip');
+        const pc = (el, ok) => { if (el) el.className = `mgr-status-pip ${ok?'pip-ok':'pip-off'}`; };
+        pc(pips[0], !!team);
+        pc(pips[1], !!(mgr.discordId || mgr.discordUsername));
+        pc(pips[2], !!mgr.zamboniTag);
+      }
+      function _openMgrDetail(mid) {
+        const mgr = state.managers.find(m => m.id === mid);
+        if (!mgr) return;
+        document.querySelectorAll('.mgr-list-item').forEach(b =>
+          b.setAttribute('aria-pressed', b.dataset.mid === mid ? 'true' : 'false')
+        );
+        $('mgr-detail-empty')?.classList.add('hidden');
+        const form = $('mgr-detail-form');
+        if (!form) return;
+        form.classList.remove('hidden');
+        const team   = getManagerTeam(mid);
+        const coTeam = Object.entries(state.teamCoOwners||{}).find(([,m])=>m===mid)?.[0] || '';
+        const dot = $('mgr-detail-dot');
+        if (dot) dot.style.background = mgr.color || '#555';
+        const ttl = $('mgr-detail-title');
+        if (ttl) ttl.textContent = mgr.name;
+        const del = $('mgr-detail-del');
+        if (del) del.dataset.mid = mid;
+        const set = (id, val) => { const el=$(id); if(el) { if(el.tagName==='INPUT'||el.tagName==='SELECT') el.value=val||''; else el.textContent=val||'—'; } };
+        set('mgr-d-name', mgr.name);
+        set('mgr-d-name-ro', mgr.name);
+        if ($('mgr-d-color')) {
+          $('mgr-d-color').value = mgr.color || '#CE1126';
+          document.querySelectorAll('.mgr-swatch').forEach(s =>
+            s.classList.toggle('swatch-active', s.dataset.color === mgr.color)
+          );
         }
-        await saveLeague();
-      })
-      .catch(() => toast('Password update failed', 'error'));
-  });
-
-  $('add-manager-btn')?.addEventListener('click', () => {
-    const name = $('new-manager-name').value.trim();
-    if (!name) return;
-    state.managers.push({ id: uid(), name, color: MANAGER_COLORS[state.managers.length % MANAGER_COLORS.length] });
-    $('new-manager-name').value = '';
-    saveState();
-    renderSettings();
-  });
-
-  document.querySelectorAll('.del-manager-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (!isAdmin) return;
-      const mid = btn.dataset.mid;
-      state.managers = state.managers.filter(m => m.id !== mid);
-      Object.keys(state.teamOwners).forEach(k => { if (state.teamOwners[k]===mid) delete state.teamOwners[k]; });
-      Object.keys(state.teamCoOwners).forEach(k => { if (state.teamCoOwners[k]===mid) delete state.teamCoOwners[k]; });
-      saveState();
-      renderSettings();
-    });
-  });
-
-  $('save-assignments-btn')?.addEventListener('click', () => {
-    document.querySelectorAll('.team-owner-select').forEach(sel => {
-      const code = sel.dataset.code;
-      if (sel.value) state.teamOwners[code] = sel.value;
-      else delete state.teamOwners[code];
-    });
-    document.querySelectorAll('.team-coowner-select').forEach(sel => {
-      const code = sel.dataset.code;
-      if (sel.value) state.teamCoOwners[code] = sel.value;
-      else delete state.teamCoOwners[code];
-    });
-    saveState();
-    toast('Team assignments saved', 'success');
-  });
-
-  $('save-rules-btn')?.addEventListener('click', () => {
-    state.rules = $('rules-editor').value;
-    saveState();
-    toast('Rules saved', 'success');
-  });
-  $('reset-rules-btn')?.addEventListener('click', () => {
-    if (!confirm('Reset rules to the default text?')) return;
-    state.rules = null;
-    saveState();
-    renderSettings();
-    toast('Rules reset to default', 'success');
-  });
-
-  $('upload-sysdata-btn')?.addEventListener('click', () => $('sysdata-file-input')?.click());
-  $('sysdata-file-input')?.addEventListener('change', async e => {
-    const file = e.target.files[0];
-    if (!file) return;
-    if (file.size > 8 * 1024 * 1024) { toast('File too large (max 8 MB)', 'error'); return; }
-    const weekVal = parseInt($('sysdata-week-input')?.value) || null;
-    try {
-      const fd = new FormData();
-      fd.append('file', file);
-      const r = await fetch('/api/sysdata', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${_adminToken}` },
-        body: fd,
-      });
-      if (!r.ok) { toast('Upload failed', 'error'); return; }
-      const meta = await r.json();
-      state.sysDataFile = {
-        name: meta.name || file.name,
-        filename: meta.filename || file.name,
-        size: meta.size || file.size,
-        uploadedAt: meta.uploadedAt || new Date().toISOString(),
-        week: weekVal,
-      };
-      saveState();
-      renderSettings();
-      toast(`${file.name} uploaded${weekVal ? ` (Week ${weekVal})` : ''} — members can now download from the dashboard`, 'success');
-    } catch (err) {
-      toast('Upload error: ' + err.message, 'error');
-    }
-  });
-  $('dl-sysdata-settings-btn')?.addEventListener('click', downloadSysData);
-  $('save-sysdata-week-btn')?.addEventListener('click', () => {
-    if (!state.sysDataFile) return;
-    const w = parseInt($('sysdata-week-input')?.value) || null;
-    state.sysDataFile.week = w;
-    saveState();
-    toast(w ? `Week ${w} saved` : 'Week cleared', 'success');
-  });
-  $('clear-sysdata-btn')?.addEventListener('click', async () => {
-    if (!confirm('Remove the SYS-DATA file?')) return;
-    try {
-      await fetch('/api/sysdata', { method: 'DELETE', headers: { 'Authorization': `Bearer ${_adminToken}` } });
-    } catch {}
-    state.sysDataFile = null; saveState(); renderSettings();
-  });
-
-  $('fetch-nhl-btn')?.addEventListener('click', () => fetchNHLRosters({ silent: false }));
-  // Playoff format
-  $('pf-save-btn')?.addEventListener('click', () => {
-    const rows = [...document.querySelectorAll('#playoff-format-rows .pf-row')];
-    state.playoffFormat = rows.map(row => ({
-      name:  row.querySelector('.pf-name-input').value.trim() || `Round ${+row.dataset.idx + 1}`,
-      winTo: +row.querySelector('.pf-bo-select').value,
-    }));
-    saveState();
-    toast('Playoff format saved', 'success');
-  });
-  $('pf-add-btn')?.addEventListener('click', () => {
-    const rows = document.querySelectorAll('#playoff-format-rows .pf-row');
-    const idx = rows.length;
-    const div = document.createElement('div');
-    div.className = 'pf-row'; div.dataset.idx = idx;
-    div.innerHTML = `
-      <span class="pf-round-num">${idx + 1}</span>
-      <input type="text" class="pf-name-input" value="Round ${idx + 1}" placeholder="Round name"
-        style="flex:1;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem">
-      <select class="pf-bo-select" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem">
-        ${[3,5,7].map(n=>`<option value="${Math.ceil(n/2)}">Bo${n}</option>`).join('')}
-      </select>
-      <button class="btn btn-ghost btn-sm pf-del-btn" data-idx="${idx}" style="padding:4px 8px;font-size:.75rem">✕</button>`;
-    $('playoff-format-rows').appendChild(div);
-    div.querySelector('.pf-del-btn').addEventListener('click', e => { e.target.closest('.pf-row').remove(); });
-  });
-  document.querySelectorAll('.pf-del-btn').forEach(btn =>
-    btn.addEventListener('click', e => { e.target.closest('.pf-row').remove(); })
-  );
-
-  $('simulate-season-btn')?.addEventListener('click', simulateFullSeason);
-
-  // Bot control
-  async function _botApiCall(path, method = 'GET') {
-    const r = await fetch(path, {
-      method,
-      headers: { 'Authorization': `Bearer ${_adminToken}` },
-    });
-    return r.json();
-  }
-  async function _refreshBotStatus() {
-    const dot   = $('bot-status-dot');
-    const label = $('bot-status-label');
-    const log   = $('bot-log');
-    if (!dot) return;
-    try {
-      const s = await _botApiCall('/api/admin/bot/status');
-      dot.style.background   = s.running ? 'var(--success)' : '#666';
-      label.textContent      = s.running ? `Running (PID ${s.pid})` : 'Stopped';
-      if (s.logs && s.logs.length) {
-        log.style.display  = 'block';
-        log.textContent    = s.logs.join('\n');
-        log.scrollTop      = log.scrollHeight;
+        set('mgr-d-team', team);
+        set('mgr-d-team-ro', team);
+        set('mgr-d-coteam', coTeam);
+        set('mgr-d-coteam-ro', coTeam);
+        set('mgr-d-discordId', mgr.discordId);
+        set('mgr-d-discordId-ro', mgr.discordId ? '✓ ' + mgr.discordId : '—');
+        set('mgr-d-discordUsername', mgr.discordUsername);
+        set('mgr-d-discordUsername-ro', mgr.discordUsername ? '@' + mgr.discordUsername : '—');
+        set('mgr-d-zamboniTag', mgr.zamboniTag);
+        set('mgr-d-zamboniTag-ro', mgr.zamboniTag);
+        _mgrPip('mgr-pip-team', !!team);
+        _mgrPip('mgr-pip-disc', !!(mgr.discordId || mgr.discordUsername));
+        _mgrPip('mgr-pip-zamb', !!mgr.zamboniTag);
+        $('mgr-save-feedback')?.classList.add('hidden');
       }
-    } catch { label.textContent = 'Unavailable'; }
-  }
-  _refreshBotStatus();
-  $('bot-start-btn')?.addEventListener('click', async () => {
-    const btn = $('bot-start-btn');
-    btn.disabled = true; btn.textContent = 'Starting…';
-    const r = await _botApiCall('/api/admin/bot/start', 'POST');
-    if (!r.ok) toast(r.error || 'Failed to start bot', 'error');
-    else toast('Bot starting…', 'success');
-    setTimeout(_refreshBotStatus, 1500);
-    btn.disabled = false; btn.textContent = '▶ Start Bot';
-  });
-  $('bot-stop-btn')?.addEventListener('click', async () => {
-    const btn = $('bot-stop-btn');
-    btn.disabled = true; btn.textContent = 'Stopping…';
-    const r = await _botApiCall('/api/admin/bot/stop', 'POST');
-    if (!r.ok) toast(r.error || 'Failed to stop bot', 'error');
-    else toast('Bot stopped.', 'success');
-    setTimeout(_refreshBotStatus, 800);
-    btn.disabled = false; btn.textContent = '■ Stop Bot';
-  });
-  $('bot-refresh-btn')?.addEventListener('click', _refreshBotStatus);
 
-  $('save-discord-cfg-btn')?.addEventListener('click', () => {
-    if (!state.discordConfig) state.discordConfig = {};
-    state.discordConfig.scoresChannel  = ($('dc-scores')?.value  || '').trim();
-    state.discordConfig.tradesChannel  = ($('dc-trades')?.value  || '').trim();
-    state.discordConfig.pendingChannel = ($('dc-pending')?.value || '').trim();
-    state.discordConfig.adminDm        = $('dc-admindm')?.checked !== false;
-    saveState();
-    toast('Discord settings saved', 'success');
-  });
-
-  $('migrate-server-btn')?.addEventListener('click', async () => {
-    const btn = $('migrate-server-btn');
-    const badge = $('api-status-badge');
-    btn.disabled = true;
-    btn.textContent = 'Pushing…';
-    try {
-      const r = await fetch('/api/state', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(_adminToken ? {'Authorization': `Bearer ${_adminToken}`} : {}) },
-        body: JSON.stringify(state),
+      document.querySelectorAll('.mgr-list-item').forEach(btn =>
+        btn.addEventListener('click', () => _openMgrDetail(btn.dataset.mid))
+      );
+      $('mgr-d-color')?.addEventListener('input', e => {
+        const c = e.target.value;
+        const d = $('mgr-detail-dot');
+        if (d) d.style.background = c;
+        document.querySelectorAll('.mgr-swatch').forEach(s =>
+          s.classList.toggle('swatch-active', s.dataset.color === c)
+        );
       });
-      if (r.ok) {
-        _apiAvailable = true;
-        toast('✓ Data migrated to server — all future saves sync automatically', 'success');
-        btn.textContent = '↑ Push to Server';
-        btn.disabled = false;
-        if (badge) { badge.textContent = '✓ Connected to server'; badge.style.color = 'var(--success)'; }
-      } else {
-        const err = await r.json().catch(() => ({}));
-        toast(`Migration failed: ${err.error || r.status}`, 'error');
-        btn.disabled = false;
-        btn.textContent = '↑ Migrate to Server';
+      document.querySelectorAll('.mgr-swatch').forEach(s =>
+        s.addEventListener('click', () => {
+          const c = s.dataset.color;
+          if ($('mgr-d-color')) $('mgr-d-color').value = c;
+          const d = $('mgr-detail-dot');
+          if (d) d.style.background = c;
+          document.querySelectorAll('.mgr-swatch').forEach(sw => sw.classList.toggle('swatch-active', sw === s));
+        })
+      );
+      $('mgr-detail-save')?.addEventListener('click', () => {
+        const mid = $('mgr-detail-del')?.dataset.mid;
+        if (!mid) return;
+        const mgr = state.managers.find(m => m.id === mid);
+        if (!mgr) return;
+        const name  = $('mgr-d-name')?.value.trim();
+        const color = $('mgr-d-color')?.value;
+        if (name)  mgr.name  = name;
+        if (color) mgr.color = color;
+        const newTeam   = $('mgr-d-team')?.value   || '';
+        const newCoteam = $('mgr-d-coteam')?.value || '';
+        Object.keys(state.teamOwners).forEach(k   => { if (state.teamOwners[k]   === mid) delete state.teamOwners[k]; });
+        Object.keys(state.teamCoOwners).forEach(k => { if (state.teamCoOwners[k] === mid) delete state.teamCoOwners[k]; });
+        if (newTeam)   state.teamOwners[newTeam]     = mid;
+        if (newCoteam) state.teamCoOwners[newCoteam] = mid;
+        const did  = $('mgr-d-discordId')?.value.trim()       || '';
+        const dun  = $('mgr-d-discordUsername')?.value.trim() || '';
+        const ztag = $('mgr-d-zamboniTag')?.value.trim()      || '';
+        if (did)  mgr.discordId       = did;  else delete mgr.discordId;
+        if (dun)  mgr.discordUsername = dun;  else delete mgr.discordUsername;
+        if (ztag) mgr.zamboniTag      = ztag; else delete mgr.zamboniTag;
+        saveState();
+        _updateMgrListItem(mid);
+        if ($('mgr-detail-title')) $('mgr-detail-title').textContent = mgr.name;
+        if (color && $('mgr-detail-dot')) $('mgr-detail-dot').style.background = color;
+        _mgrPip('mgr-pip-team', !!getManagerTeam(mid));
+        _mgrPip('mgr-pip-disc', !!(mgr.discordId || mgr.discordUsername));
+        _mgrPip('mgr-pip-zamb', !!mgr.zamboniTag);
+        const fb = $('mgr-save-feedback');
+        if (fb) { fb.classList.remove('hidden'); setTimeout(() => fb.classList.add('hidden'), 2500); }
+        toast(`${mgr.name} saved`, 'success');
+      });
+      $('mgr-detail-del')?.addEventListener('click', () => {
+        const mid = $('mgr-detail-del').dataset.mid;
+        if (!mid) return;
+        const mgr = state.managers.find(m => m.id === mid);
+        if (!confirm(`Remove manager "${mgr?.name}"?`)) return;
+        state.managers = state.managers.filter(m => m.id !== mid);
+        Object.keys(state.teamOwners).forEach(k   => { if (state.teamOwners[k]   === mid) delete state.teamOwners[k]; });
+        Object.keys(state.teamCoOwners).forEach(k => { if (state.teamCoOwners[k] === mid) delete state.teamCoOwners[k]; });
+        saveState();
+        renderSettings();
+      });
+      function _applyMgrFilter() {
+        const q    = ($('mgr-search')?.value || '').toLowerCase().trim();
+        const filt = $('mgr-filter-status')?.value || '';
+        document.querySelectorAll('.mgr-list-item').forEach(btn => {
+          const mid  = btn.dataset.mid;
+          const mgr  = state.managers.find(m => m.id === mid);
+          if (!mgr) { btn.classList.add('hidden'); return; }
+          const team  = getManagerTeam(mid);
+          const matchQ = !q || mgr.name.toLowerCase().includes(q) || (team||'').toLowerCase().includes(q);
+          const matchF = !filt
+            || (filt === 'no-team'    && !team)
+            || (filt === 'no-discord' && !(mgr.discordId || mgr.discordUsername))
+            || (filt === 'no-zamboni' && !mgr.zamboniTag);
+          btn.classList.toggle('hidden', !matchQ || !matchF);
+        });
       }
-    } catch (e) {
-      toast(`Migration failed: ${e.message}`, 'error');
-      btn.disabled = false;
-      btn.textContent = '↑ Migrate to Server';
+      $('mgr-search')?.addEventListener('input', _applyMgrFilter);
+      $('mgr-filter-status')?.addEventListener('change', _applyMgrFilter);
+      $('add-manager-btn')?.addEventListener('click', () => {
+        const name = $('new-manager-name')?.value.trim();
+        if (!name) return;
+        state.managers.push({ id: uid(), name, color: MANAGER_COLORS[state.managers.length % MANAGER_COLORS.length] });
+        $('new-manager-name').value = '';
+        saveState();
+        renderSettings();
+      });
+      (() => {
+        const inp  = $('mgr-d-zamboniTag');
+        const drop = $('zdrop-detail');
+        if (!inp || !drop) return;
+        inp.addEventListener('focus', () => _getZamboniPlayers(), { once: true });
+        inp.addEventListener('input', async () => {
+          const q = inp.value.trim().toLowerCase();
+          drop.innerHTML = '';
+          if (!q) { drop.classList.remove('open'); return; }
+          const players = await _getZamboniPlayers();
+          const matches = players.filter(p => p.toLowerCase().includes(q)).slice(0, 8);
+          if (!matches.length) { drop.classList.remove('open'); return; }
+          matches.forEach(tag => {
+            const div = document.createElement('div');
+            div.className = 'zamboni-option';
+            div.textContent = tag;
+            div.addEventListener('mousedown', e => {
+              e.preventDefault(); inp.value = tag; drop.innerHTML = ''; drop.classList.remove('open');
+            });
+            drop.appendChild(div);
+          });
+          drop.classList.add('open');
+        });
+        inp.addEventListener('blur', () => setTimeout(() => drop.classList.remove('open'), 150));
+      })();
+      break;
     }
-  });
 
-  $('export-btn')?.addEventListener('click', () => {
-    const json = JSON.stringify(state, null, 2);
-    const a = document.createElement('a');
-    a.href = 'data:application/json,' + encodeURIComponent(json);
-    a.download = `nhl-league-${Date.now()}.json`;
-    a.click();
-  });
-
-  $('import-btn-show')?.addEventListener('click', () => {
-    $('import-area').classList.toggle('hidden');
-  });
-
-  $('import-confirm-btn')?.addEventListener('click', () => {
-    try {
-      const imported = JSON.parse($('import-json').value);
-      Object.assign(state, imported);
-      saveState();
-      renderSettings();
-      toast('League data imported', 'success');
-    } catch { toast('Invalid JSON', 'error'); }
-  });
-
-  $('reset-btn')?.addEventListener('click', () => {
-    if (confirm('Reset ALL league data? This cannot be undone.')) {
-      state = defaultState();
-      saveState();
-      clearAdminSession();
-      renderSection('dashboard');
-      navigate('dashboard');
-      toast('League reset', 'info');
+    case 'league': {
+      $('save-league-btn')?.addEventListener('click', () => {
+        state.league.name = $('set-league-name').value;
+        state.league.season = $('set-season').value;
+        const newPw = $('set-admin-pw')?.value?.trim() || '';
+        const saveLeague = async () => {
+          saveState();
+          $('league-title').textContent = state.league.name;
+          renderSettings();
+          toast('League settings saved', 'success');
+        };
+        if (!newPw) { saveLeague(); return; }
+        _apiFetch('/api/auth/password', { method: 'POST', body: JSON.stringify({ password: newPw }) })
+          .then(async r => {
+            const body = await r.json().catch(() => ({}));
+            if (!r.ok || !body.ok) {
+              if (r.status === 401) clearAdminSession({ rerender: true });
+              toast(body.error || 'Password update failed', 'error');
+              return;
+            }
+            await saveLeague();
+          })
+          .catch(() => toast('Password update failed', 'error'));
+      });
+      break;
     }
-  });
 
-  $('admin-logout-btn')?.addEventListener('click', () => {
-    clearAdminSession();
-    renderSettings();
-    toast('Logged out', 'info');
-  });
+    case 'seasons': {
+      $('save-season-btn')?.addEventListener('click', () => {
+        const snap = saveSeasonSnapshot();
+        toast(`Season ${snap.number} snapshot saved`, 'success');
+        renderSettings();
+      });
+      $('new-season-btn')?.addEventListener('click', startNewSeason);
+      document.querySelectorAll('.view-season-btn').forEach(btn =>
+        btn.addEventListener('click', () => viewSeasonModal(btn.dataset.sid))
+      );
+      document.querySelectorAll('.load-season-btn').forEach(btn =>
+        btn.addEventListener('click', () => loadSeasonSnapshot(btn.dataset.sid))
+      );
+      document.querySelectorAll('.del-season-btn').forEach(btn =>
+        btn.addEventListener('click', () => {
+          if (!isAdmin) return;
+          if (!confirm('Delete this season archive?')) return;
+          state.seasons = state.seasons.filter(s => s.id !== btn.dataset.sid);
+          saveState();
+          renderSettings();
+        })
+      );
+      break;
+    }
 
-  $('save-season-btn')?.addEventListener('click', () => {
-    const snap = saveSeasonSnapshot();
-    toast(`Season ${snap.number} snapshot saved`, 'success');
-    renderSettings();
-  });
+    case 'discord': {
+      async function _botApiCall(path, method = 'GET') {
+        const r = await fetch(path, { method, headers: { 'Authorization': `Bearer ${_adminToken}` } });
+        return r.json();
+      }
+      async function _refreshBotStatus() {
+        const dot   = $('bot-status-dot');
+        const label = $('bot-status-label');
+        if (!dot) return;
+        try {
+          const s = await _botApiCall('/api/admin/bot/status');
+          dot.style.background = s.running ? 'var(--success)' : '#666';
+          label.textContent    = s.running ? `Running (PID ${s.pid})` : 'Stopped';
+          const log = $('bot-log');
+          if (log && s.logs && s.logs.length) {
+            log.style.display = 'block';
+            log.textContent   = s.logs.join('\n');
+            log.scrollTop     = log.scrollHeight;
+          }
+        } catch { label.textContent = 'Unavailable'; }
+      }
+      _refreshBotStatus();
+      $('bot-start-btn')?.addEventListener('click', async () => {
+        const btn = $('bot-start-btn');
+        btn.disabled = true; btn.textContent = 'Starting…';
+        const r = await _botApiCall('/api/admin/bot/start', 'POST');
+        if (!r.ok) toast(r.error || 'Failed to start bot', 'error');
+        else toast('Bot starting…', 'success');
+        setTimeout(_refreshBotStatus, 1500);
+        btn.disabled = false; btn.textContent = '▶ Start Bot';
+      });
+      $('bot-stop-btn')?.addEventListener('click', async () => {
+        const btn = $('bot-stop-btn');
+        btn.disabled = true; btn.textContent = 'Stopping…';
+        const r = await _botApiCall('/api/admin/bot/stop', 'POST');
+        if (!r.ok) toast(r.error || 'Failed to stop bot', 'error');
+        else toast('Bot stopped.', 'success');
+        setTimeout(_refreshBotStatus, 800);
+        btn.disabled = false; btn.textContent = '■ Stop Bot';
+      });
+      $('bot-refresh-btn')?.addEventListener('click', _refreshBotStatus);
+      $('save-discord-cfg-btn')?.addEventListener('click', () => {
+        if (!state.discordConfig) state.discordConfig = {};
+        state.discordConfig.scoresChannel  = ($('dc-scores')?.value  || '').trim();
+        state.discordConfig.tradesChannel  = ($('dc-trades')?.value  || '').trim();
+        state.discordConfig.pendingChannel = ($('dc-pending')?.value || '').trim();
+        state.discordConfig.adminDm        = $('dc-admindm')?.checked !== false;
+        saveState();
+        toast('Discord settings saved', 'success');
+      });
+      break;
+    }
 
-  $('new-season-btn')?.addEventListener('click', startNewSeason);
+    case 'playoffs': {
+      $('pf-save-btn')?.addEventListener('click', () => {
+        const rows = [...document.querySelectorAll('#playoff-format-rows .pf-row')];
+        state.playoffFormat = rows.map(row => ({
+          name:  row.querySelector('.pf-name-input').value.trim() || `Round ${+row.dataset.idx + 1}`,
+          winTo: +row.querySelector('.pf-bo-select').value,
+        }));
+        saveState();
+        toast('Playoff format saved', 'success');
+      });
+      $('pf-add-btn')?.addEventListener('click', () => {
+        const rows = document.querySelectorAll('#playoff-format-rows .pf-row');
+        const idx = rows.length;
+        const div = document.createElement('div');
+        div.className = 'pf-row'; div.dataset.idx = idx;
+        div.innerHTML = `
+          <span class="pf-round-num">${idx + 1}</span>
+          <input type="text" class="pf-name-input" value="Round ${idx + 1}" placeholder="Round name"
+            style="flex:1;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem">
+          <select class="pf-bo-select" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--input-bg);color:var(--chrome-bright);font-size:.82rem">
+            ${[3,5,7].map(n=>`<option value="${Math.ceil(n/2)}">Bo${n}</option>`).join('')}
+          </select>
+          <button class="btn btn-ghost btn-sm pf-del-btn" data-idx="${idx}" style="padding:4px 8px;font-size:.75rem">✕</button>`;
+        $('playoff-format-rows').appendChild(div);
+        div.querySelector('.pf-del-btn').addEventListener('click', e => { e.target.closest('.pf-row').remove(); });
+      });
+      document.querySelectorAll('.pf-del-btn').forEach(btn =>
+        btn.addEventListener('click', e => { e.target.closest('.pf-row').remove(); })
+      );
+      break;
+    }
 
-  document.querySelectorAll('.view-season-btn').forEach(btn => {
-    btn.addEventListener('click', () => viewSeasonModal(btn.dataset.sid));
-  });
+    case 'sysdata': {
+      $('upload-sysdata-btn')?.addEventListener('click', () => $('sysdata-file-input')?.click());
+      $('sysdata-file-input')?.addEventListener('change', async e => {
+        const file = e.target.files[0];
+        if (!file) return;
+        if (file.size > 8 * 1024 * 1024) { toast('File too large (max 8 MB)', 'error'); return; }
+        const weekVal = parseInt($('sysdata-week-input')?.value) || null;
+        try {
+          const fd = new FormData();
+          fd.append('file', file);
+          const r = await fetch('/api/sysdata', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${_adminToken}` },
+            body: fd,
+          });
+          if (!r.ok) { toast('Upload failed', 'error'); return; }
+          const meta = await r.json();
+          state.sysDataFile = {
+            name: meta.name || file.name,
+            filename: meta.filename || file.name,
+            size: meta.size || file.size,
+            uploadedAt: meta.uploadedAt || new Date().toISOString(),
+            week: weekVal,
+          };
+          saveState();
+          renderSettings();
+          toast(`${file.name} uploaded${weekVal ? ` (Week ${weekVal})` : ''} — members can now download from the dashboard`, 'success');
+        } catch (err) {
+          toast('Upload error: ' + err.message, 'error');
+        }
+      });
+      $('dl-sysdata-settings-btn')?.addEventListener('click', downloadSysData);
+      $('save-sysdata-week-btn')?.addEventListener('click', () => {
+        if (!state.sysDataFile) return;
+        const w = parseInt($('sysdata-week-input')?.value) || null;
+        state.sysDataFile.week = w;
+        saveState();
+        toast(w ? `Week ${w} saved` : 'Week cleared', 'success');
+      });
+      $('clear-sysdata-btn')?.addEventListener('click', async () => {
+        if (!confirm('Remove the SYS-DATA file?')) return;
+        try {
+          await fetch('/api/sysdata', { method: 'DELETE', headers: { 'Authorization': `Bearer ${_adminToken}` } });
+        } catch {}
+        state.sysDataFile = null; saveState(); renderSettings();
+      });
+      break;
+    }
 
-  document.querySelectorAll('.load-season-btn').forEach(btn => {
-    btn.addEventListener('click', () => loadSeasonSnapshot(btn.dataset.sid));
-  });
+    case 'rules': {
+      $('save-rules-btn')?.addEventListener('click', () => {
+        state.rules = $('rules-editor').value;
+        saveState();
+        toast('Rules saved', 'success');
+      });
+      $('reset-rules-btn')?.addEventListener('click', () => {
+        if (!confirm('Reset rules to the default text?')) return;
+        state.rules = null;
+        saveState();
+        renderSettings();
+        toast('Rules reset to default', 'success');
+      });
+      break;
+    }
 
-  document.querySelectorAll('.del-season-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (!isAdmin) return;
-      if (!confirm('Delete this season archive?')) return;
-      state.seasons = state.seasons.filter(s => s.id !== btn.dataset.sid);
-      saveState();
-      renderSettings();
-    });
-  });
+    case 'roster': {
+      $('fetch-nhl-btn')?.addEventListener('click', () => fetchNHLRosters({ silent: false }));
+      break;
+    }
+
+    case 'data': {
+      $('migrate-server-btn')?.addEventListener('click', async () => {
+        const btn = $('migrate-server-btn');
+        const badge = $('api-status-badge');
+        btn.disabled = true;
+        btn.textContent = 'Pushing…';
+        try {
+          const r = await fetch('/api/state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(_adminToken ? {'Authorization': `Bearer ${_adminToken}`} : {}) },
+            body: JSON.stringify(state),
+          });
+          if (r.ok) {
+            _apiAvailable = true;
+            toast('✓ Data migrated to server — all future saves sync automatically', 'success');
+            btn.textContent = '↑ Push to Server';
+            btn.disabled = false;
+            if (badge) { badge.textContent = '✓ Connected to server'; badge.style.color = 'var(--success)'; }
+          } else {
+            const err = await r.json().catch(() => ({}));
+            toast(`Migration failed: ${err.error || r.status}`, 'error');
+            btn.disabled = false;
+            btn.textContent = '↑ Migrate to Server';
+          }
+        } catch (e) {
+          toast(`Migration failed: ${e.message}`, 'error');
+          btn.disabled = false;
+          btn.textContent = '↑ Migrate to Server';
+        }
+      });
+      $('export-btn')?.addEventListener('click', () => {
+        const json = JSON.stringify(state, null, 2);
+        const a = document.createElement('a');
+        a.href = 'data:application/json,' + encodeURIComponent(json);
+        a.download = `nhl-league-${Date.now()}.json`;
+        a.click();
+      });
+      $('import-btn-show')?.addEventListener('click', () => {
+        $('import-area').classList.toggle('hidden');
+      });
+      $('import-file-input')?.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        $('import-file-name').textContent = file.name;
+        const reader = new FileReader();
+        reader.onload = (ev) => { $('import-json').value = ev.target.result; };
+        reader.readAsText(file);
+      });
+      $('import-confirm-btn')?.addEventListener('click', () => {
+        try {
+          const imported = JSON.parse($('import-json').value);
+          Object.assign(state, imported);
+          saveState();
+          renderSettings();
+          toast('League data imported', 'success');
+        } catch { toast('Invalid JSON', 'error'); }
+      });
+      $('reset-btn')?.addEventListener('click', () => {
+        if (confirm('Reset ALL league data? This cannot be undone.')) {
+          state = defaultState();
+          saveState();
+          clearAdminSession();
+          renderSection('dashboard');
+          navigate('dashboard');
+          toast('League reset', 'info');
+        }
+      });
+      $('simulate-season-btn')?.addEventListener('click', simulateFullSeason);
+      $('admin-logout-btn')?.addEventListener('click', () => {
+        clearAdminSession();
+        renderSettings();
+        toast('Logged out', 'info');
+      });
+      break;
+    }
+  }
 }
-
 // ================================================================
 // 16. ADMIN LOGIN (HEADER BUTTON)
 // ================================================================

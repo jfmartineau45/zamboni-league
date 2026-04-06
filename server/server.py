@@ -22,6 +22,7 @@ from server.routes.state import state_bp
 from server.routes.sysdata import sysdata_bp
 from server.routes.pending import pending_bp
 from server.routes.games import games_bp
+from server.routes.zamboni import zamboni_bp
 from server import botmanager
 
 # ── App setup ────────────────────────────────────────────────────────────────
@@ -89,6 +90,7 @@ app.register_blueprint(state_bp)
 app.register_blueprint(sysdata_bp)
 app.register_blueprint(pending_bp)
 app.register_blueprint(games_bp)
+app.register_blueprint(zamboni_bp)
 
 
 

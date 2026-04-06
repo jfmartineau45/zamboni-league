@@ -32,6 +32,7 @@ EXTENSIONS = [
     'bot.commands.standings',
     'bot.commands.pending',
     'bot.commands.powerrankings',
+    'bot.commands.signup',
 ]
 
 

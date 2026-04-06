@@ -39,17 +39,6 @@ def _fmt_pending(item: dict) -> discord.Embed:
         if payload.get('notes'):
             desc += f'\n_Notes: {payload["notes"]}_'
         title = '🔄 Trade Submission'
-    elif req_type == 'linkAccount':
-        mgr_name  = payload.get('managerName', payload.get('managerId', '?'))
-        disc_user = payload.get('discordUsername', '?')
-        disc_id   = payload.get('discordId', '?')
-        rpcn      = payload.get('zamboniTag', '?')
-        desc  = (
-            f'**Manager:** {mgr_name}\n'
-            f'**Discord:** {disc_user} (`{disc_id}`)\n'
-            f'**RPCN Account:** `{rpcn}`'
-        )
-        title = '🔗 Account Link Request'
     else:
         desc = str(payload)
         title = f'📋 {req_type.title()} Submission'
