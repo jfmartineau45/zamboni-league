@@ -67,6 +67,7 @@ def score_result_embed(payload: dict, state: dict, approved_by: str) -> discord.
         Title:   NYR  3 – 1  PIT  · OT          (no OT suffix if regulation)
         Fields:  [🏠 Home | 📊 Score | ✈️ Away]
                  [Manager | FINAL/OT | Manager  ]
+        Box Score: Stats fields if zamboniStats available
         Thumbnail: winning team's logo
         Footer:  Week 2 · Mar 22 – Mar 28  ·  ✅ Approved by AdminName
     """
@@ -104,6 +105,43 @@ def score_result_embed(payload: dict, state: dict, approved_by: str) -> discord.
         value=f'**{at}**\n{a_mgr}' if a_mgr else f'**{at}**',
         inline=True,
     )
+
+    # Box score stats (only present when submitted via Zamboni picker)
+    zs = payload.get('zamboniStats')
+    if zs:
+        h_st = zs.get('home', {})
+        a_st = zs.get('away', {})
+        fo_total = (h_st.get('fo', 0) + a_st.get('fo', 0)) or 1
+        h_fo = round(h_st.get('fo', 0) / fo_total * 100)
+        a_fo = 100 - h_fo
+
+        def _toa(s):
+            s = int(s or 0); return f"{s//60}:{s%60:02d}"
+
+        embed.add_field(name='📊  BOX SCORE', value='⠀', inline=False)  # Zero-width space for spacing
+        
+        embed.add_field(
+            name=f'🏠  {ht}',
+            value=(
+                f"Shots **{h_st.get('shots','?')}**\n"
+                f"Hits **{h_st.get('hits','?')}**\n"
+                f"PP **{h_st.get('ppg',0)}/{h_st.get('ppo',0)}**\n"
+                f"FO% **{h_fo}%**\n"
+                f"TOA **{_toa(h_st.get('toa',0))}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name=f'✈️  {at}',
+            value=(
+                f"Shots **{a_st.get('shots','?')}**\n"
+                f"Hits **{a_st.get('hits','?')}**\n"
+                f"PP **{a_st.get('ppg',0)}/{a_st.get('ppo',0)}**\n"
+                f"FO% **{a_fo}%**\n"
+                f"TOA **{_toa(a_st.get('toa',0))}**"
+            ),
+            inline=True,
+        )
 
     embed.set_thumbnail(url=_logo_url(winner))
     embed.set_footer(text=f'{week}  ·  ✅ Approved by {approved_by}')

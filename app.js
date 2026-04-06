@@ -3379,6 +3379,19 @@ async function showGameBoxScore(g) {
   $('modal-box').classList.add('modal-wide');
   showModal('Box Score', '<div class="empty-state">Loading stats…</div>');
 
+  // If game has zamboniStats stored directly, use that
+  if (g.zamboniStats) {
+    try {
+      const stats = typeof g.zamboniStats === 'string' ? JSON.parse(g.zamboniStats) : g.zamboniStats;
+      const html = zbRenderCard(stats.home, stats.away, homeMgr, awayMgr, g.homeTeam, g.awayTeam);
+      $('modal-body').innerHTML = `<div style="margin:-18px">${html}</div>`;
+      $('modal-title').textContent = `${g.homeTeam} vs ${g.awayTeam}`;
+      return;
+    } catch (err) {
+      console.error('Failed to parse zamboniStats:', err);
+    }
+  }
+
   if (!homeMgr?.zamboniTag || !awayMgr?.zamboniTag) {
     // One or both managers don't have a Zamboni tag — nothing to show
     $('modal-box').classList.remove('modal-wide');
@@ -3822,6 +3835,10 @@ function renderSettings() {
           <label>📥 Pending / Approvals Channel ID <span class="text-dim" style="font-size:.7rem;font-weight:400">(optional — alternative to admin DMs)</span></label>
           <input id="dc-pending" placeholder="e.g. 1363924034609217620" value="${(state.discordConfig||{}).pendingChannel||''}">
         </div>
+        <div class="form-row">
+          <label>🔗 Signups Channel ID</label>
+          <input id="dc-signups" placeholder="e.g. 1363924034609217621" value="${(state.discordConfig||{}).signupsChannel||''}">
+        </div>
         <div class="form-row" style="align-items:center;gap:10px">
           <label style="margin:0">DM admins for approvals</label>
           <input type="checkbox" id="dc-admindm" ${(state.discordConfig||{}).adminDm !== false ? 'checked' : ''} style="width:auto;accent-color:var(--primary)">
@@ -4256,11 +4273,13 @@ function renderSettings() {
         btn.disabled = false; btn.textContent = '■ Stop Bot';
       });
       $('bot-refresh-btn')?.addEventListener('click', _refreshBotStatus);
+      
       $('save-discord-cfg-btn')?.addEventListener('click', () => {
         if (!state.discordConfig) state.discordConfig = {};
         state.discordConfig.scoresChannel  = ($('dc-scores')?.value  || '').trim();
         state.discordConfig.tradesChannel  = ($('dc-trades')?.value  || '').trim();
         state.discordConfig.pendingChannel = ($('dc-pending')?.value || '').trim();
+        state.discordConfig.signupsChannel = ($('dc-signups')?.value || '').trim();
         state.discordConfig.adminDm        = $('dc-admindm')?.checked !== false;
         saveState();
         toast('Discord settings saved', 'success');

@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.api import api_get, api_patch
-from bot.auth import get_token
+from bot.auth import get_token, set_token
 import bot.config as config
 
 
@@ -115,103 +115,66 @@ class PendingCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name='pending', description='List pending score/trade submissions')
+    @app_commands.command(
+        name='pending',
+        description='[Admin] List all pending scores and trades'
+    )
     async def pending(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        """Show all pending items that need approval."""
+        await interaction.response.defer(ephemeral=True)
 
-        status, items = await api_get('/api/pending?status=pending', token=get_token())
-        # Note: GET /api/pending requires admin JWT — the bot's token must be set.
-        # If not set, instruct user to use the web admin panel.
-        if status == 401 or not get_token():
+        from bot.api import get_state
+        from bot.auth import get_token
+        state = await get_state()
+        token = get_token()
+
+        if not token:
             await interaction.followup.send(
-                '⚠️ The bot needs an admin token to list pending items.\n'
-                'Run `/botlogin <password>` first to authenticate the bot.',
-                ephemeral=True,
+                'Bot not authenticated. Restart the bot to auto-authenticate.', ephemeral=True
             )
             return
 
-        if not isinstance(items, list) or not items:
-            await interaction.followup.send('No pending requests.', ephemeral=True)
-            return
-
-        for item in items[:10]:  # Cap at 10 to avoid spam
-            embed = _fmt_pending(item)
-            view  = ApproveView(item['id'], _bot_token)
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-
-    @app_commands.command(
-        name='notify-admins',
-        description='Send all pending items to admins via DM'
-    )
-    async def notify_admins(self, interaction: discord.Interaction):
-        """DM all admins with pending submissions."""
-        await interaction.response.defer(ephemeral=True)
-
-        # Send immediate response so Discord doesn't timeout
-        await interaction.followup.send('📤 Sending pending items to admins...', ephemeral=True)
-
-        status, items = await api_get('/api/pending?status=pending', token=get_token())
-        if status == 401 or not get_token():
-            print("[ERROR] Bot not authenticated")
-            return
-
-        if not isinstance(items, list) or not items:
-            print("[INFO] No pending items")
-            return
-
-        if not config.ADMIN_ROLE_ID or not interaction.guild:
-            print("[ERROR] Admin role not configured")
-            return
-
-        role = interaction.guild.get_role(config.ADMIN_ROLE_ID)
-        if not role:
-            print(f"[ERROR] Admin role {config.ADMIN_ROLE_ID} not found")
-            return
-
-        # Use cached members
-        admins = [m for m in interaction.guild.members if any(r.id == config.ADMIN_ROLE_ID for r in m.roles)]
-        print(f"[DEBUG] Found {len(admins)} admins, sending {len(items)} pending items")
-
-        sent_count = 0
-        for member in admins:
-            try:
-                for item in items:
-                    embed = _fmt_pending(item)
-                    view = ApproveView(item['id'], _bot_token)
-                    await member.send(embed=embed, view=view)
-                sent_count += 1
-            except Exception as e:
-                print(f"[DEBUG] Failed to DM {member.name}: {e}")
-
-        print(f"[DEBUG] ✅ Sent to {sent_count}/{len(admins)} admins")
-
-    @app_commands.command(
-        name='botlogin',
-        description='Authenticate the bot with admin password'
-    )
-    @app_commands.describe(password='Admin password')
-    async def botlogin(self, interaction: discord.Interaction, password: str):
-        """Logs the bot in as admin so /notify-admins works."""
-        await interaction.response.defer(ephemeral=True)
-
+        # Fetch pending items
         import aiohttp
-        import bot.config as cfg
         async with aiohttp.ClientSession() as s:
-            async with s.post(
-                f'{cfg.API_BASE}/api/auth',
-                json={'password': password},
-                headers={'Content-Type': 'application/json'},
+            async with s.get(
+                f'{config.API_BASE}/api/pending',
+                headers={'Authorization': f'Bearer {token}'}
             ) as r:
-                body = await r.json(content_type=None)
+                if r.status != 200:
+                    await interaction.followup.send('Failed to fetch pending items.', ephemeral=True)
+                    return
+                items = await r.json(content_type=None)
 
-        if r.status == 200 and body.get('token'):
-            global _bot_token
-            _bot_token = body['token']
-            await interaction.followup.send('✅ Bot authenticated as admin.', ephemeral=True)
-        else:
-            await interaction.followup.send(
-                f'❌ Authentication failed: {body.get("error", "Unknown")}', ephemeral=True
-            )
+        if not items:
+            await interaction.followup.send('No pending items.', ephemeral=True)
+            return
+
+        # Group by type
+        scores = [i for i in items if i.get('type') == 'score']
+        trades = [i for i in items if i.get('type') == 'trade']
+
+        embed = discord.Embed(
+            title='📋 Pending Items',
+            color=discord.Color.gold()
+        )
+
+        if scores:
+            score_text = '\n'.join([
+                f"• {p['payload']['homeTeam']} {p['payload']['homeScore']} – {p['payload']['awayScore']} {p['payload']['awayTeam']}"
+                for p in scores[:10]
+            ])
+            embed.add_field(name=f'⚽ Scores ({len(scores)})', value=score_text or 'None', inline=False)
+
+        if trades:
+            trade_text = '\n'.join([
+                f"• {p['payload']['fromTeam']} ↔ {p['payload']['toTeam']} ({len(p['payload']['playersSent'])}↔{len(p['payload']['playersReceived'])} players)"
+                for p in trades[:10]
+            ])
+            embed.add_field(name=f'🔄 Trades ({len(trades)})', value=trade_text or 'None', inline=False)
+
+        embed.set_footer(text='Use the approval buttons in DMs/pending channel to process')
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

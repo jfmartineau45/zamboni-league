@@ -131,8 +131,9 @@ async def _notify_admins_signup(
     )
     view = SignupApprovalView(req_id)
 
-    # DM every admin-role member
-    if config.ADMIN_ROLE_ID and interaction.guild:
+    # DM every admin-role member (only if adminDm is enabled)
+    admin_dm_enabled = dc.get('adminDm', True)  # Default to True if not set
+    if admin_dm_enabled and config.ADMIN_ROLE_ID and interaction.guild:
         role = interaction.guild.get_role(config.ADMIN_ROLE_ID)
         if role:
             for member in role.members:

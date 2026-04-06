@@ -212,7 +212,18 @@ h3 { font-family: 'Oswald', sans-serif; font-size: 1rem; font-weight: 600; }
 .nav-btn[data-section="scores"]::before   { content: '◎'; }
 .nav-btn[data-section="schedule"]::before  { content: '▦'; }
 .nav-btn[data-section="standings"]::before { content: '◆'; }
-.nav-btn[data-section="playoffs"]::before  { content: '🏆'; font-size: .75rem; }
+.nav-btn[data-section="playoffs"]::before  { 
+  content: ''; 
+  background-image: url('assets/ZamboniCupPlayoffs.png');
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  display: inline-block;
+  width: 20px;
+  height: 16px;
+  margin-right: 2px;
+  opacity: .7;
+}
 .nav-btn[data-section="trades"]::before    { content: '⇌'; }
 .nav-btn[data-section="rules"]::before     { content: '📋'; font-size: .75rem; }
 .nav-btn[data-section="settings"]::before  { content: '⚙'; }
