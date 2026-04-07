@@ -682,6 +682,13 @@ class ScoreCog(commands.Cog):
         discord_id = str(interaction.user.id)
         mgr        = _find_manager_by_discord(state, discord_id)
 
+        if not mgr:
+            await interaction.followup.send(
+                'You need to use `/signup` before you can submit a score.',
+                ephemeral=True,
+            )
+            return
+
         # ── Zamboni flow ──────────────────────────────────────────────────────
         if mgr and mgr.get('zamboniTag'):
             team_code = _get_team_for_manager(state, mgr['id'])
@@ -692,18 +699,33 @@ class ScoreCog(commands.Cog):
                 )
                 return
 
+            all_unplayed = [g for g in state.get('games', []) if not g.get('played')]
+            reg_weeks = [g['week'] for g in all_unplayed if (g.get('week') or 0) < 100]
+            po_weeks = [g['week'] for g in all_unplayed if (g.get('week') or 0) >= 100]
+            auto_week = min(reg_weeks) if reg_weeks else (min(po_weeks) if po_weeks else 1)
+            state_week = state.get('currentWeek')
+            try:
+                cur_week = int(state_week) if state_week is not None else auto_week
+            except (TypeError, ValueError):
+                cur_week = auto_week
+
             my_games = sorted(
                 [
                     g for g in state.get('games', [])
                     if not g.get('played')
                     and (g.get('homeTeam') == team_code or g.get('awayTeam') == team_code)
+                    and (
+                        ((g.get('week') or 0) >= 100)
+                        or
+                        ((g.get('week') or 0) < 100 and (g.get('week') or 0) <= cur_week)
+                    )
                 ],
                 key=lambda g: (g.get('week', 999), g.get('id', '')),
             )
 
             if not my_games:
                 await interaction.followup.send(
-                    f'No unplayed games found for **{team_code}**.',
+                    f'No unplayed games found for **{team_code}** through the current week.',
                     ephemeral=True,
                 )
                 return
@@ -723,21 +745,26 @@ class ScoreCog(commands.Cog):
         unplayed     = [g for g in games if not g.get('played')]
         reg_weeks    = [g['week'] for g in unplayed if (g.get('week') or 0) < 100]
         po_weeks     = [g['week'] for g in unplayed if (g.get('week') or 0) >= 100]
-        cur_week     = min(reg_weeks) if reg_weeks else (min(po_weeks) if po_weeks else 1)
-        week_games   = [g for g in unplayed if g.get('week') == cur_week]
+        auto_week    = min(reg_weeks) if reg_weeks else (min(po_weeks) if po_weeks else 1)
+        state_week   = state.get('currentWeek')
+        try:
+            cur_week = int(state_week) if state_week is not None else auto_week
+        except (TypeError, ValueError):
+            cur_week = auto_week
+        week_games = [
+            g for g in unplayed
+            if ((g.get('week') or 0) >= 100)
+            or ((g.get('week') or 0) < 100 and (g.get('week') or 0) <= cur_week)
+        ]
 
         if not week_games:
-            await interaction.followup.send('No unplayed games this week.', ephemeral=True)
+            await interaction.followup.send('No unplayed games through the current week.', ephemeral=True)
             return
-
-        hint = ''
-        if not mgr:
-            hint = '\n*Link your Discord account in Settings to use the Zamboni picker.*'
 
         week_label = _PO_ROUND_LABELS.get(cur_week, f'Week {cur_week}') if cur_week >= 100 else f'Week {cur_week}'
         view = ManualGameView(week_games, self.bot)
         await interaction.followup.send(
-            f'**Manual score entry** ({week_label}) — pick your game:{hint}',
+            f'**Manual score entry** (through {week_label}) — pick your game:',
             view=view,
             ephemeral=True,
         )
