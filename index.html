@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NHL Legacy League Manager</title>
-  <link rel="stylesheet" href="styles.css?v=24">
+  <link rel="stylesheet" href="styles.css?v=36">
 </head>
 <body>
   <div id="app">
@@ -14,12 +14,15 @@
       <div class="header-brand">
         <img src="assets/zamboni.png" class="brand-zamboni" alt="Zamboni">
         <span id="league-title">NHL Legacy League</span>
+        <button id="hamburger-btn" class="hamburger-btn" aria-label="Menu">
+          <span></span><span></span><span></span>
+        </button>
       </div>
       <nav id="main-nav">
         <button class="nav-btn active" data-section="dashboard">Dashboard</button>
         <button class="nav-btn" data-section="teams">Teams</button>
         <button class="nav-btn" data-section="players">Players</button>
-        <button class="nav-btn" data-section="draft">Draft</button>
+        <button class="nav-btn" data-section="scores">Scores</button>
         <button class="nav-btn" data-section="schedule">Schedule</button>
         <button class="nav-btn" data-section="standings">Standings</button>
         <button class="nav-btn" data-section="playoffs">Playoffs</button>
@@ -38,6 +41,7 @@
       <section id="section-dashboard" class="section active"></section>
       <section id="section-teams"     class="section"></section>
       <section id="section-players"   class="section"></section>
+      <section id="section-scores"    class="section"></section>
       <section id="section-draft"     class="section"></section>
       <section id="section-schedule"  class="section"></section>
       <section id="section-standings" class="section"></section>
@@ -62,7 +66,8 @@
     <div id="toast-container" aria-live="polite"></div>
 
   </div>
-
-  <script src="app.js?v=26"></script>
-</body>
-</html>
+  
+  <script src="draft.js?v=1"></script>
+  <script src="app.js?v=44"></script>
+ </body>
+ </html>

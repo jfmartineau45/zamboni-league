@@ -115,6 +115,8 @@ def review_pending(req_id):
                     _apply_score(state, payload)
                 elif req_type == 'trade':
                     _apply_trade(state, payload)
+                elif req_type == 'linkAccount':
+                    _apply_link_account(state, payload)
                 conn.execute(
                     "UPDATE league_state SET data=?, updated=datetime('now') WHERE id=1",
                     (json.dumps(state),)
@@ -132,11 +134,12 @@ def review_pending(req_id):
 # ── State mutation helpers ────────────────────────────────────────────────────
 
 def _apply_score(state, payload):
-    """Mark a game as played and record the score."""
-    game_id = payload.get('gameId')
+    """Mark a game as played and record the score.
+    Also stores zamboniGameId + zamboniStats when submitted via the Zamboni picker."""
+    game_id    = payload.get('gameId')
     home_score = int(payload.get('homeScore', 0))
     away_score = int(payload.get('awayScore', 0))
-    ot = bool(payload.get('ot', False))
+    ot         = bool(payload.get('ot', False))
 
     for g in state.get('games', []):
         if g['id'] == game_id:
@@ -144,18 +147,170 @@ def _apply_score(state, payload):
             g['homeScore'] = home_score
             g['awayScore'] = away_score
             g['ot']        = ot
-            # Determine winner
-            if home_score > away_score:
-                g['winner'] = g['homeTeam']
-            else:
-                g['winner'] = g['awayTeam']
+            g['postedAt']  = datetime.now(timezone.utc).isoformat()
+            if payload.get('zamboniGameId'):
+                g['zamboniGameId'] = payload['zamboniGameId']
+            if payload.get('zamboniStats'):
+                g['zamboniStats'] = payload['zamboniStats']
+            g['winner'] = g['homeTeam'] if home_score > away_score else g['awayTeam']
+            # If it's a playoff game, recalculate the bracket
+            if g.get('playoff'):
+                _recalc_playoff_bracket(state)
             return
     raise ValueError(f"Game {game_id} not found")
 
 
+def _recalc_playoff_bracket(state):
+    """Recalculate playoff bracket wins from real game scores, generate next game stubs."""
+    import uuid as _uuid
+
+    po = state.get('playoffs')
+    if not po or not po.get('rounds'):
+        return
+
+    rounds = po['rounds']
+
+    for ri, round_ in enumerate(rounds):
+        win_to = round_.get('winTo', 2)
+        po_week = 100 + ri
+
+        for s in round_.get('series', []):
+            t1, t2 = s.get('team1'), s.get('team2')
+            if not t1 or not t2:
+                continue
+
+            # Count wins from played playoff games between these two teams
+            series_games = [
+                g for g in state.get('games', [])
+                if g.get('playoff') and g.get('played') and
+                ((g['homeTeam'] == t1 and g['awayTeam'] == t2) or
+                 (g['homeTeam'] == t2 and g['awayTeam'] == t1))
+            ]
+
+            w1 = w2 = 0
+            for g in series_games:
+                if g['homeScore'] > g['awayScore']:
+                    if g['homeTeam'] == t1: w1 += 1
+                    else:                   w2 += 1
+                else:
+                    if g['awayTeam'] == t1: w1 += 1
+                    else:                   w2 += 1
+
+            s['wins1'] = w1
+            s['wins2'] = w2
+
+            if w1 >= win_to:
+                s['winner'] = t1
+            elif w2 >= win_to:
+                s['winner'] = t2
+            else:
+                s['winner'] = None
+                # Ensure an unplayed game stub exists for the next game
+                game_num = w1 + w2 + 1
+                has_pending = any(
+                    g for g in state.get('games', [])
+                    if g.get('playoff') and not g.get('played') and
+                    ((g['homeTeam'] == t1 and g['awayTeam'] == t2) or
+                     (g['homeTeam'] == t2 and g['awayTeam'] == t1))
+                )
+                if not has_pending:
+                    round_name = round_.get('name', f'Round {ri + 1}')
+                    state.setdefault('games', []).append({
+                        'id':        str(_uuid.uuid4()),
+                        'week':      po_week,
+                        'game':      game_num,
+                        'homeTeam':  t1,
+                        'awayTeam':  t2,
+                        'played':    False,
+                        'homeScore': 0,
+                        'awayScore': 0,
+                        'ot':        False,
+                        'playoff':   True,
+                        'notes':     f'{round_name} – Game {game_num}',
+                    })
+
+        # If round is complete, populate & generate stubs for next round
+        series_list = round_.get('series', [])
+        all_done = bool(series_list) and all(s.get('winner') for s in series_list)
+        if all_done and ri + 1 < len(rounds):
+            next_round = rounds[ri + 1]
+            if not next_round.get('series'):
+                # Re-seed: sort winners by advancing seed (best remaining vs worst remaining)
+                advancers = []
+                for s in series_list:
+                    advancing_seed = s.get('seed1', 99) if s['winner'] == s['team1'] else s.get('seed2', 99)
+                    advancers.append({'team': s['winner'], 'seed': advancing_seed})
+                advancers.sort(key=lambda a: a['seed'])
+                n = len(advancers)
+                next_series = []
+                for i in range(n // 2):
+                    t1 = advancers[i]['team']
+                    t2 = advancers[n - 1 - i]['team']
+                    if t1 and t2:
+                        next_series.append({
+                            'team1': t1, 'team2': t2,
+                            'wins1': 0, 'wins2': 0, 'winner': None,
+                            'winTo': next_round.get('winTo', 2),
+                            'seed1': advancers[i]['seed'],
+                            'seed2': advancers[n - 1 - i]['seed'],
+                        })
+                next_round['series'] = next_series
+
+                next_week    = 100 + ri + 1
+                round_name   = next_round.get('name', f'Round {ri + 2}')
+                for s in next_series:
+                    state.setdefault('games', []).append({
+                        'id':        str(_uuid.uuid4()),
+                        'week':      next_week,
+                        'game':      1,
+                        'homeTeam':  s['team1'],
+                        'awayTeam':  s['team2'],
+                        'played':    False,
+                        'homeScore': 0,
+                        'awayScore': 0,
+                        'ot':        False,
+                        'playoff':   True,
+                        'notes':     f'{round_name} – Game 1',
+                    })
+
+
+def _apply_trade_history(state):
+    """Python equivalent of JS applyTradeHistory() — replays all trades chronologically to set teamCode."""
+    def to_list(v):
+        if isinstance(v, list):
+            return v
+        return [v] if v else []
+
+    trades = sorted(state.get('trades', []), key=lambda t: t.get('date', ''))
+    player_map = {p['name']: p for p in state.get('players', [])}
+    for t in trades:
+        for name in to_list(t.get('playersSent', [])):
+            p = player_map.get(name)
+            if p:
+                p['teamCode'] = t['toTeam']
+        for name in to_list(t.get('playersReceived', [])):
+            p = player_map.get(name)
+            if p:
+                p['teamCode'] = t['fromTeam']
+
+
+def _apply_link_account(state, payload):
+    """Write discordId, discordUsername, and zamboniTag onto a manager record."""
+    mgr_id = payload.get('managerId')
+    for mgr in state.get('managers', []):
+        if mgr['id'] == mgr_id:
+            if payload.get('discordId'):
+                mgr['discordId'] = str(payload['discordId'])
+            if payload.get('discordUsername'):
+                mgr['discordUsername'] = payload['discordUsername']
+            if payload.get('zamboniTag'):
+                mgr['zamboniTag'] = payload['zamboniTag']
+            return
+    raise ValueError(f"Manager {mgr_id} not found")
+
+
 def _apply_trade(state, payload):
-    """Append a trade record to the state."""
-    import time
+    """Append a trade record to the state and update player teamCode values."""
     trade = {
         'id':              payload.get('id', str(uuid.uuid4())),
         'date':            payload.get('date', datetime.now(timezone.utc).date().isoformat()),
@@ -166,3 +321,4 @@ def _apply_trade(state, payload):
         'notes':           payload.get('notes', ''),
     }
     state.setdefault('trades', []).insert(0, trade)
+    _apply_trade_history(state)

@@ -23,8 +23,14 @@ def set_state():
     # First POST seeds the DB (bootstrap migration) — no auth required.
     # All subsequent POSTs require a valid admin JWT.
     conn = get_conn()
-    row = conn.execute("SELECT 1 FROM league_state WHERE id=1").fetchone()
+    row = conn.execute("SELECT data FROM league_state WHERE id=1").fetchone()
     has_state = bool(row)
+    existing_state = None
+    if row:
+        try:
+            existing_state = json.loads(row['data'])
+        except Exception:
+            existing_state = None
     conn.close()
     if has_state:
         from server.routes.auth import check_auth
@@ -34,6 +40,10 @@ def set_state():
     data = request.get_json(force=True)
     if data is None:
         return jsonify({'error': 'Invalid JSON'}), 400
+
+    existing_admin_hash = ((existing_state or {}).get('league') or {}).get('adminHash')
+    if existing_admin_hash:
+        data.setdefault('league', {})['adminHash'] = existing_admin_hash
 
     blob = json.dumps(data)
     conn = get_conn()

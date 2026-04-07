@@ -31,6 +31,7 @@ EXTENSIONS = [
     'bot.commands.trade',
     'bot.commands.standings',
     'bot.commands.pending',
+    'bot.commands.signup',
 ]
 
 

@@ -1,7 +1,6 @@
 """
 commands/trade.py  —  /trade command (admin only)
-All inputs are autocomplete dropdowns — no free-text typing needed.
-Up to 3 players per side. Submitted trade goes to pending queue for review.
+Cleaner trade flow: team autocomplete in slash command, then player dropdowns.
 """
 import discord
 from discord import app_commands
@@ -27,39 +26,6 @@ def _is_admin(interaction: discord.Interaction) -> bool:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-async def _team_choices(current: str) -> list[app_commands.Choice]:
-    teams = await get_teams()
-    current_up = current.upper()
-    choices = []
-    for t in teams:
-        code = t.get('code', '')
-        name = t.get('name', code)
-        label = f"{name} ({code})"
-        if not current_up or current_up in code.upper() or current_up in name.upper():
-            choices.append(app_commands.Choice(name=label[:100], value=code))
-    return choices[:25]
-
-
-async def _player_choices(current: str, team_code: str) -> list[app_commands.Choice]:
-    """Return players on the given team, filtered by current search string."""
-    if not team_code:
-        return []
-    state = await get_state()
-    players = state.get('players', [])
-    team_up = team_code.upper()
-    current_up = current.upper()
-    choices = []
-    for p in players:
-        if (p.get('teamCode') or '').upper() != team_up:
-            continue
-        name = p.get('name', '')
-        ovr  = p.get('ovr', '')
-        label = f"{name}  {ovr}" if ovr else name
-        if not current_up or current_up in name.upper():
-            choices.append(app_commands.Choice(name=label[:100], value=name))
-    return choices[:25]
-
-
 def _name_for(code: str, teams: list[dict]) -> str:
     t = next((x for x in teams if x.get('code', '').upper() == code.upper()), None)
     return t['name'] if t else code
@@ -75,128 +41,167 @@ def _website_view() -> discord.ui.View:
     return view
 
 
-# ── Cog ───────────────────────────────────────────────────────────────────────
+async def _team_choices(current: str) -> list[app_commands.Choice[str]]:
+    teams = await get_teams()
+    current_up = current.upper().strip()
+    choices = []
+    for t in teams:
+        code = (t.get('code') or '').upper()
+        name = t.get('name') or code
+        label = f"{name} ({code})"
+        if not current_up or current_up in code or current_up in name.upper():
+            choices.append(app_commands.Choice(name=label[:100], value=code))
+    return choices[:25]
 
-class TradeCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+
+class TradePlayerSelect(discord.ui.Select):
+    def __init__(self, parent_view: 'PlayerSelectView', team_code: str, options: list[discord.SelectOption], kind: str):
+        self.parent_view = parent_view
+        self.kind = kind
+        placeholder = (
+            'Select players FROM team is sending...'
+            if kind == 'from'
+            else 'Select players TO team is sending back...'
+        )
+        super().__init__(
+            placeholder=placeholder,
+            options=options,
+            min_values=0,
+            max_values=min(3, len(options)),
+            custom_id=f'trade_players_{kind}_{team_code.lower()}',
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.kind == 'from':
+            self.parent_view.selected_from_players = list(self.values)
+        else:
+            self.parent_view.selected_to_players = list(self.values)
+        await interaction.response.defer()
+
+
+# ── Player Selection View ─────────────────────────────────────────────────────
+
+class PlayerSelectView(discord.ui.View):
+    def __init__(self, from_team: str, to_team: str, teams: list, state: dict, bot: commands.Bot):
+        super().__init__(timeout=600)
+        self.from_team = from_team
+        self.to_team = to_team
+        self.teams = teams
+        self.state = state
         self.bot = bot
-
-    # Team autocomplete (shared)
-    async def _team_ac(self, interaction: discord.Interaction, current: str):
-        return await _team_choices(current)
-
-    # Player autocomplete — reads the already-selected team from the namespace
-    async def _from_player_ac(self, interaction: discord.Interaction, current: str):
-        team = getattr(interaction.namespace, 'from_team', '') or ''
-        return await _player_choices(current, team)
-
-    async def _to_player_ac(self, interaction: discord.Interaction, current: str):
-        team = getattr(interaction.namespace, 'to_team', '') or ''
-        return await _player_choices(current, team)
-
-    @app_commands.command(
-        name='trade',
-        description='[Admin] Record a trade between two teams'
-    )
-    @app_commands.describe(
-        from_team   = 'Team sending players  →',
-        to_team     = 'Team receiving / sending back  →',
-        from_p1     = 'Player sent by FROM team',
-        from_p2     = 'Player sent by FROM team (optional)',
-        from_p3     = 'Player sent by FROM team (optional)',
-        to_p1       = 'Player sent by TO team (optional)',
-        to_p2       = 'Player sent by TO team (optional)',
-        to_p3       = 'Player sent by TO team (optional)',
-        notes       = 'Optional note (e.g. "future considerations")',
-    )
-    @app_commands.autocomplete(
-        from_team=_team_ac,
-        to_team=_team_ac,
-        from_p1=_from_player_ac,
-        from_p2=_from_player_ac,
-        from_p3=_from_player_ac,
-        to_p1=_to_player_ac,
-        to_p2=_to_player_ac,
-        to_p3=_to_player_ac,
-    )
-    async def trade(
-        self,
-        interaction: discord.Interaction,
-        from_team: str,
-        to_team:   str,
-        from_p1:   str,
-        from_p2:   str = '',
-        from_p3:   str = '',
-        to_p1:     str = '',
-        to_p2:     str = '',
-        to_p3:     str = '',
-        notes:     str = '',
-    ):
-        if not _is_admin(interaction):
+        self.selected_from_players = []
+        self.selected_to_players = []
+        
+        # Get players for each team
+        self.from_team_players = [
+            p for p in state.get('players', []) 
+            if p.get('teamCode', '').upper() == from_team.upper()
+        ]
+        self.to_team_players = [
+            p for p in state.get('players', []) 
+            if p.get('teamCode', '').upper() == to_team.upper()
+        ]
+        
+        # Create player selects
+        self._add_player_selects()
+        
+        # Add submit button
+        self.submit_btn = discord.ui.Button(
+            label='Submit Trade',
+            style=discord.ButtonStyle.success,
+            custom_id='submit_trade'
+        )
+        self.submit_btn.callback = self._submit_trade
+        self.add_item(self.submit_btn)
+        
+        # Add cancel button
+        self.cancel_btn = discord.ui.Button(
+            label='Cancel',
+            style=discord.ButtonStyle.secondary,
+            custom_id='cancel_trade'
+        )
+        self.cancel_btn.callback = self._cancel
+        self.add_item(self.cancel_btn)
+    
+    def _add_player_selects(self):
+        # From team players
+        if self.from_team_players:
+            from_options = [
+                discord.SelectOption(
+                    label=f"{p['name']} ({p.get('ovr','?')})",
+                    value=p['name']
+                )
+                for p in self.from_team_players[:25]
+            ]
+            self.add_item(TradePlayerSelect(self, self.from_team, from_options, 'from'))
+        
+        # To team players
+        if self.to_team_players:
+            to_options = [
+                discord.SelectOption(
+                    label=f"{p['name']} ({p.get('ovr','?')})",
+                    value=p['name']
+                )
+                for p in self.to_team_players[:25]
+            ]
+            self.add_item(TradePlayerSelect(self, self.to_team, to_options, 'to'))
+    
+    async def _submit_trade(self, interaction: discord.Interaction):
+        # Get selected players
+        from_players = self.selected_from_players
+        to_players = self.selected_to_players
+        
+        if not from_players and not to_players:
             await interaction.response.send_message(
-                '🔒 Trade entry is admin-only.', ephemeral=True
+                'At least one player must be included in the trade.', ephemeral=True
             )
             return
-
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
-        from_code = from_team.upper()
-        to_code   = to_team.upper()
-
-        if from_code == to_code:
-            await interaction.followup.send('From and To teams must be different.', ephemeral=True)
-            return
-
-        players_sent     = [p for p in [from_p1, from_p2, from_p3] if p.strip()]
-        players_received = [p for p in [to_p1, to_p2, to_p3] if p.strip()]
-
-        if not players_sent and not players_received:
-            await interaction.followup.send(
-                'At least one player must be included.', ephemeral=True
-            )
-            return
-
+        
+        # Create payload
         payload = {
-            'fromTeam':        from_code,
-            'toTeam':          to_code,
-            'playersSent':     players_sent,
-            'playersReceived': players_received,
-            'notes':           notes.strip(),
+            'fromTeam': self.from_team,
+            'toTeam': self.to_team,
+            'playersSent': list(from_players),
+            'playersReceived': list(to_players),
+            'notes': '',  # No notes for simplicity
         }
-
+        
+        # Submit trade
         status, body = await api_post('/api/pending', {
-            'type':          'trade',
-            'payload':       payload,
-            'submittedBy':   str(interaction.user.id),
+            'type': 'trade',
+            'payload': payload,
+            'submittedBy': str(interaction.user.id),
             'submittedName': interaction.user.display_name,
         })
-
+        
         if status != 200:
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 f"Failed to submit: {body.get('error', 'Unknown')}", ephemeral=True
             )
             return
-
+        
         req_id = body['id']
-        teams  = await get_teams()
-        state  = await get_state()
-        embed  = trade_pending_embed(payload, teams, state, interaction.user.display_name, req_id)
-
-        # Confirm to admin submitter
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-        # Notify admins — via DM and/or pending channel based on config
+        embed = trade_pending_embed(payload, self.teams, self.state, interaction.user.display_name, req_id)
+        
+        # Update message with confirmation
+        await interaction.response.edit_message(
+            content='✅ **Trade submitted for approval!**',
+            embed=embed,
+            view=None
+        )
+        
+        # Notify admins
         from bot.api import get_discord_config
-        dc        = await get_discord_config()
-        admin_dm  = dc.get('adminDm', True)
+        dc = await get_discord_config()
+        admin_dm = dc.get('adminDm', True)
         raw_pc_id = dc.get('pendingChannel') or ''
         try:
             pending_ch_id = int(raw_pc_id) if raw_pc_id.strip() else config.PENDING_CHANNEL
         except (ValueError, AttributeError):
             pending_ch_id = config.PENDING_CHANNEL
-
+        
         view = TradeApprovalView(req_id, payload, interaction.user.display_name, self.bot)
-
+        
         # DM each admin
         if admin_dm and config.ADMIN_ROLE_ID and interaction.guild:
             role = interaction.guild.get_role(config.ADMIN_ROLE_ID)
@@ -210,8 +215,8 @@ class TradeCog(commands.Cog):
                         )
                     except discord.Forbidden:
                         pass
-
-        # Post to pending channel (if configured)
+        
+        # Post to pending channel
         if pending_ch_id and interaction.guild:
             pend_ch = interaction.guild.get_channel(pending_ch_id)
             if pend_ch:
@@ -223,6 +228,70 @@ class TradeCog(commands.Cog):
                     )
                 except Exception:
                     pass
+    
+    async def _cancel(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content='Trade cancelled.',
+            embed=None,
+            view=None
+        )
+
+
+# ── Cog ───────────────────────────────────────────────────────────────────────
+
+class TradeCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    async def _team_ac(self, interaction: discord.Interaction, current: str):
+        return await _team_choices(current)
+
+    @app_commands.command(
+        name='trade',
+        description='[Admin] Record a trade between two teams'
+    )
+    @app_commands.describe(
+        from_team='Team sending players',
+        to_team='Team receiving players',
+    )
+    @app_commands.autocomplete(
+        from_team=_team_ac,
+        to_team=_team_ac,
+    )
+    async def trade(self, interaction: discord.Interaction, from_team: str, to_team: str):
+        if not _is_admin(interaction):
+            await interaction.response.send_message(
+                '🔒 Trade entry is admin-only.', ephemeral=True
+            )
+            return
+        
+        # Load data
+        teams = await get_teams()
+        state = await get_state()
+        from_team = from_team.upper().strip()
+        to_team = to_team.upper().strip()
+
+        valid_codes = {str(t.get('code', '')).upper() for t in teams}
+        if from_team not in valid_codes or to_team not in valid_codes:
+            await interaction.response.send_message(
+                'Choose valid teams from the autocomplete list.',
+                ephemeral=True,
+            )
+            return
+
+        if from_team == to_team:
+            await interaction.response.send_message(
+                'From and To teams must be different.',
+                ephemeral=True,
+            )
+            return
+        
+        view = PlayerSelectView(from_team, to_team, teams, state, self.bot)
+        await interaction.response.send_message(
+            f'**{from_team}** ↔ **{to_team}**\n\nSelect the players to trade:',
+            view=view,
+            ephemeral=True
+        )
 
 
 # ── Approval view (posted to pending channel) ─────────────────────────────────

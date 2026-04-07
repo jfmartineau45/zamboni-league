@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "roster-app",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "server.server"],
+      "port": 5000
+    }
+  ]
+}

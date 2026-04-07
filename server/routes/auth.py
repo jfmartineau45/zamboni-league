@@ -4,11 +4,13 @@ Exports @require_admin decorator used by all protected routes.
 """
 from flask import Blueprint, request, jsonify, g
 from functools import wraps
+from collections import deque
 import jwt
 import json
 import os
 import ctypes
 from datetime import datetime, timedelta, timezone
+import bcrypt
 from server.db import get_conn
 
 
@@ -35,6 +37,10 @@ auth_bp = Blueprint('auth', __name__)
 JWT_SECRET = os.environ.get('NHL_JWT_SECRET', 'nhl-legacy-league-secret-change-me')
 JWT_ALGO   = 'HS256'
 JWT_TTL_H  = 12
+AUTH_RATE_LIMIT_WINDOW_S = 300
+AUTH_RATE_LIMIT_ATTEMPTS = 5
+AUTH_RATE_LIMIT_LOCKOUT_S = 900
+_AUTH_ATTEMPTS = {}
 
 
 def _get_admin_hash():
@@ -51,41 +57,155 @@ def _get_admin_hash():
         return None
 
 
+def _load_state_blob():
+    conn = get_conn()
+    row = conn.execute("SELECT data FROM league_state WHERE id=1").fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        return json.loads(row['data'])
+    except Exception:
+        return None
+
+
+def _save_admin_hash(admin_hash: str):
+    conn = get_conn()
+    row = conn.execute("SELECT data FROM league_state WHERE id=1").fetchone()
+    if not row:
+        state = {'league': {}}
+    else:
+        state = json.loads(row['data'])
+    state.setdefault('league', {})['adminHash'] = admin_hash
+    conn.execute(
+        """
+        INSERT INTO league_state (id, data, updated)
+        VALUES (1, ?, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated=excluded.updated
+        """,
+        (json.dumps(state),)
+    )
+    conn.commit()
+    conn.close()
+
+
+def _password_hash(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+
+def _is_bcrypt_hash(value: str | None) -> bool:
+    return bool(value and value.startswith('$2'))
+
+
+def _record_failed_attempt(client_id: str):
+    now = datetime.now(timezone.utc).timestamp()
+    entry = _AUTH_ATTEMPTS.setdefault(client_id, {'attempts': deque(), 'locked_until': 0})
+    attempts = entry['attempts']
+    while attempts and now - attempts[0] > AUTH_RATE_LIMIT_WINDOW_S:
+        attempts.popleft()
+    attempts.append(now)
+    if len(attempts) >= AUTH_RATE_LIMIT_ATTEMPTS:
+        entry['locked_until'] = now + AUTH_RATE_LIMIT_LOCKOUT_S
+
+
+def _clear_failed_attempts(client_id: str):
+    _AUTH_ATTEMPTS.pop(client_id, None)
+
+
+def _rate_limit_error(client_id: str):
+    now = datetime.now(timezone.utc).timestamp()
+    entry = _AUTH_ATTEMPTS.setdefault(client_id, {'attempts': deque(), 'locked_until': 0})
+    attempts = entry['attempts']
+    while attempts and now - attempts[0] > AUTH_RATE_LIMIT_WINDOW_S:
+        attempts.popleft()
+    if entry['locked_until'] > now:
+        retry_after = max(1, int(entry['locked_until'] - now))
+        resp = jsonify({'error': 'Too many login attempts. Try again later.'})
+        resp.status_code = 429
+        resp.headers['Retry-After'] = str(retry_after)
+        return resp
+    if entry['locked_until'] and entry['locked_until'] <= now:
+        entry['locked_until'] = 0
+        entry['attempts'].clear()
+    return None
+
+
+def _client_id():
+    forwarded = request.headers.get('X-Forwarded-For', '')
+    if forwarded:
+        return forwarded.split(',', 1)[0].strip()
+    return request.remote_addr or 'unknown'
+
+
+def _issue_token():
+    return jwt.encode(
+        {'role': 'admin', 'exp': datetime.now(timezone.utc) + timedelta(hours=JWT_TTL_H)},
+        JWT_SECRET, algorithm=JWT_ALGO
+    )
+
+
 @auth_bp.route('/api/auth', methods=['POST'])
 def login():
+    client_id = _client_id()
+    limited = _rate_limit_error(client_id)
+    if limited is not None:
+        return limited
+
     body = request.get_json(force=True) or {}
     password = body.get('password', '')
     if not password:
         return jsonify({'error': 'password required'}), 400
+    if len(password) < 8:
+        return jsonify({'error': 'Password must be at least 8 characters'}), 400
 
     admin_hash = _get_admin_hash()
-    # App uses simpleHash: polynomial rolling hash, 32-bit signed int, base-36
     pw_hash = _simple_hash(password)
 
     if not admin_hash:
-        # First-time setup: set the password directly in the stored state blob
         try:
-            conn = get_conn()
-            row = conn.execute("SELECT data FROM league_state WHERE id=1").fetchone()
-            if row:
-                state = json.loads(row['data'])
-                state.setdefault('league', {})['adminHash'] = pw_hash
-                conn.execute(
-                    "UPDATE league_state SET data=?, updated=datetime('now') WHERE id=1",
-                    (json.dumps(state),)
-                )
-                conn.commit()
-            conn.close()
+            _save_admin_hash(_password_hash(password))
         except Exception as exc:
             return jsonify({'error': f'Setup failed: {exc}'}), 500
-    elif pw_hash != admin_hash:
+    elif _is_bcrypt_hash(admin_hash):
+        if not bcrypt.checkpw(password.encode('utf-8'), admin_hash.encode('utf-8')):
+            _record_failed_attempt(client_id)
+            return jsonify({'error': 'Wrong password'}), 401
+    elif pw_hash == admin_hash:
+        try:
+            _save_admin_hash(_password_hash(password))
+        except Exception as exc:
+            return jsonify({'error': f'Password migration failed: {exc}'}), 500
+    else:
+        _record_failed_attempt(client_id)
         return jsonify({'error': 'Wrong password'}), 401
 
-    token = jwt.encode(
-        {'role': 'admin', 'exp': datetime.now(timezone.utc) + timedelta(hours=JWT_TTL_H)},
-        JWT_SECRET, algorithm=JWT_ALGO
-    )
+    _clear_failed_attempts(client_id)
+    token = _issue_token()
     return jsonify({'token': token})
+
+
+@auth_bp.route('/api/auth/session', methods=['GET'])
+def auth_session():
+    ok, err = check_auth()
+    if not ok:
+        return err
+    return jsonify({'ok': True, 'role': getattr(g, 'admin_role', None)})
+
+
+@auth_bp.route('/api/auth/password', methods=['POST'])
+def update_password():
+    ok, err = check_auth()
+    if not ok:
+        return err
+    body = request.get_json(force=True) or {}
+    password = body.get('password', '')
+    if len(password) < 8:
+        return jsonify({'error': 'Password must be at least 8 characters'}), 400
+    try:
+        _save_admin_hash(_password_hash(password))
+    except Exception as exc:
+        return jsonify({'error': f'Password update failed: {exc}'}), 500
+    return jsonify({'ok': True})
 
 
 def _extract_token():
