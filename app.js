@@ -658,6 +658,133 @@ async function handlePortalGamePick(gameId) {
   openPortalManualScoreModal(game);
 }
 
+async function showProposeTrade() {
+  if (_portalBusy) return;
+  _portalBusy = true;
+  
+  try {
+    const r = await _portalFetch('/api/v2/me/roster');
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      toast(body.error || 'Could not load roster', 'error');
+      return;
+    }
+    const data = await r.json();
+    
+    if (data.deadlinePassed) {
+      toast('Trade deadline has passed', 'error');
+      return;
+    }
+    
+    openTradeProposalModal(data);
+  } catch (e) {
+    toast('Failed to load trade data', 'error');
+  } finally {
+    _portalBusy = false;
+  }
+}
+
+function openTradeProposalModal(data) {
+  const { myTeam, roster, otherTeams } = data;
+  
+  const teamOptions = otherTeams.map(code => 
+    `<option value="${code}">${code}</option>`
+  ).join('');
+  
+  const myPlayersList = roster.map(pid => {
+    const name = PLAYER_DB[pid] || `Player #${pid}`;
+    return `<label class="portal-checkbox-row"><input type="checkbox" class="trade-my-player" value="${pid}"> ${name}</label>`;
+  }).join('');
+  
+  showModal('🔄 Propose Trade', `
+    <div class="form-row">
+      <label>Trade with</label>
+      <select id="trade-partner-select">
+        <option value="">— Select team —</option>
+        ${teamOptions}
+      </select>
+    </div>
+    
+    <div class="form-row">
+      <label>Your players (${myTeam})</label>
+      <div id="trade-my-players" style="max-height:200px;overflow-y:auto;border:1px solid #333;padding:8px;border-radius:4px">
+        ${myPlayersList || '<div class="text-dim">No players on roster</div>'}
+      </div>
+    </div>
+    
+    <div class="form-row">
+      <label>Their players</label>
+      <div id="trade-their-players" style="max-height:200px;overflow-y:auto;border:1px solid #333;padding:8px;border-radius:4px">
+        <div class="text-dim">Select a team first</div>
+      </div>
+    </div>
+    
+    <button id="modal-ok" class="btn btn-primary btn-block mt-12">Submit Trade Proposal</button>
+  `, async () => {
+    await submitTradeProposal();
+  });
+  
+  // Load partner roster when team selected
+  $('trade-partner-select')?.addEventListener('change', async (e) => {
+    const partnerTeam = e.target.value;
+    if (!partnerTeam) {
+      $('trade-their-players').innerHTML = '<div class="text-dim">Select a team first</div>';
+      return;
+    }
+    
+    const partnerRoster = state.rosters?.[partnerTeam] || [];
+    const partnerPlayersList = partnerRoster.map(pid => {
+      const name = PLAYER_DB[pid] || `Player #${pid}`;
+      return `<label class="portal-checkbox-row"><input type="checkbox" class="trade-their-player" value="${pid}"> ${name}</label>`;
+    }).join('');
+    
+    $('trade-their-players').innerHTML = partnerPlayersList || '<div class="text-dim">No players on roster</div>';
+  });
+}
+
+async function submitTradeProposal() {
+  const partnerTeam = $('trade-partner-select')?.value;
+  if (!partnerTeam) {
+    toast('Select a trade partner', 'error');
+    return;
+  }
+  
+  const myPlayers = Array.from(document.querySelectorAll('.trade-my-player:checked')).map(cb => parseInt(cb.value));
+  const theirPlayers = Array.from(document.querySelectorAll('.trade-their-player:checked')).map(cb => parseInt(cb.value));
+  
+  if (!myPlayers.length && !theirPlayers.length) {
+    toast('Select at least one player', 'error');
+    return;
+  }
+  
+  const btn = $('modal-ok');
+  if (btn) btn.disabled = true;
+  
+  try {
+    const r = await _portalFetch('/api/v2/me/propose-trade', {
+      method: 'POST',
+      body: JSON.stringify({
+        otherTeam: partnerTeam,
+        playersSent: myPlayers,
+        playersReceived: theirPlayers,
+      }),
+    });
+    
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      toast(body.error || 'Could not submit trade', 'error');
+      if (btn) btn.disabled = false;
+      return;
+    }
+    
+    hideModal();
+    toast('Trade proposal submitted!', 'success');
+  } catch (e) {
+    toast('Failed to submit trade', 'error');
+    if (btn) btn.disabled = false;
+  }
+}
+
 function portalCardHTML() {
   if (!_portalSession?.user) {
     return `
@@ -754,6 +881,9 @@ function portalCardHTML() {
           </div>
         </div>
         <div class="portal-games-stack">${gamesHtml}</div>
+        <div style="margin-top:16px;padding:0 16px 16px">
+          <button class="btn btn-secondary btn-block" id="portal-propose-trade-btn">🔄 Propose Trade</button>
+        </div>
       </div>
     </div>`;
 }
@@ -762,6 +892,7 @@ function bindPortalDashboardActions() {
   $('portal-login-btn')?.addEventListener('click', () => startPortalLogin());
   $('portal-logout-btn')?.addEventListener('click', handlePortalLogout);
   $('portal-link-form')?.addEventListener('submit', submitPortalLink);
+  $('portal-propose-trade-btn')?.addEventListener('click', showProposeTrade);
   const rpcnInput = $('portal-zamboni-tag');
   const rpcnDrop = $('portal-rpcn-drop');
   if (rpcnInput) {
@@ -5061,7 +5192,7 @@ function updatePortalUI() {
   $('portal-badge')?.classList.toggle('hidden', !_portalSession?.linked);
   if ($('portal-toggle-btn')) {
     $('portal-toggle-btn').textContent = _portalSession?.user
-      ? (_portalSession?.linked ? 'My Scores' : 'Finish Signup')
+      ? (_portalSession?.linked ? 'Player Portal' : 'Finish Signup')
       : 'Player Login';
   }
 }
