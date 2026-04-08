@@ -755,7 +755,7 @@ function portalCardHTML() {
 }
 
 function bindPortalDashboardActions() {
-  $('portal-login-btn')?.addEventListener('click', () => startPortalLogin('/?portal=1'));
+  $('portal-login-btn')?.addEventListener('click', () => startPortalLogin());
   $('portal-logout-btn')?.addEventListener('click', handlePortalLogout);
   $('portal-link-form')?.addEventListener('submit', submitPortalLink);
   const rpcnInput = $('portal-zamboni-tag');
@@ -5067,7 +5067,7 @@ function handlePortalToggle() {
   const slot = document.querySelector('.portal-dashboard-slot');
   if (slot) slot.scrollIntoView({ behavior: 'smooth', block: 'start' });
   if (_portalSession?.user) return;
-  startPortalLogin('/?portal=1');
+  startPortalLogin();
 }
 
 function handlePortalQueryParams() {

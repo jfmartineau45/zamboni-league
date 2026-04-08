@@ -83,7 +83,7 @@ class PostingService:
         view.add_item(discord.ui.Button(
             label='Open Player Portal',
             style=discord.ButtonStyle.link,
-            url=f"{config.APP_URL}/?portal=1",
+            url=config.APP_URL,
         ))
 
         try:
