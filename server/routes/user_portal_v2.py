@@ -687,6 +687,121 @@ def admin_list_submissions():
     return jsonify({'submissions': submissions})
 
 
+@user_portal_v2_bp.route('/api/v2/me/roster', methods=['GET'])
+def get_my_roster():
+    """Get current manager's roster for trade proposals"""
+    user = _current_user()
+    ok, err = _check_user_linked(user)
+    if not ok:
+        return err
+    
+    link = _get_user_link(user['id'])
+    if not link:
+        return jsonify({'error': 'Account is not linked to a manager'}), 409
+    
+    state = _load_state()
+    my_team = _get_team_for_manager(state, link['manager_id'])
+    if not my_team:
+        return jsonify({'error': 'You are not assigned to a team'}), 404
+    
+    # Get roster for my team
+    roster = state.get('rosters', {}).get(my_team, [])
+    
+    # Get other teams for trade partner selection
+    other_teams = [
+        code for code in state.get('teamOwners', {}).keys()
+        if code != my_team
+    ]
+    
+    # Check trade deadline status
+    trade_deadline = state.get('tradeDeadline')
+    deadline_passed = False
+    if trade_deadline:
+        from datetime import datetime, timezone
+        try:
+            deadline_dt = datetime.fromisoformat(trade_deadline.replace('Z', '+00:00'))
+            deadline_passed = datetime.now(timezone.utc) > deadline_dt
+        except Exception:
+            pass
+    
+    return jsonify({
+        'myTeam': my_team,
+        'roster': roster,
+        'otherTeams': other_teams,
+        'tradeDeadline': trade_deadline,
+        'deadlinePassed': deadline_passed,
+    })
+
+
+@user_portal_v2_bp.route('/api/v2/me/propose-trade', methods=['POST'])
+def propose_trade():
+    """Manager proposes a trade for admin approval"""
+    user = _current_user()
+    ok, err = _check_user_linked(user)
+    if not ok:
+        return err
+    
+    link = _get_user_link(user['id'])
+    if not link:
+        return jsonify({'error': 'Account is not linked to a manager'}), 409
+    
+    state = _load_state()
+    manager = _find_manager_by_id(state, link['manager_id'])
+    if not manager:
+        return jsonify({'error': 'Linked manager not found'}), 404
+    
+    my_team = _get_team_for_manager(state, link['manager_id'])
+    if not my_team:
+        return jsonify({'error': 'You are not assigned to a team'}), 404
+    
+    body = request.get_json(force=True) or {}
+    other_team = body.get('otherTeam', '').strip()
+    players_sent = body.get('playersSent', [])
+    players_received = body.get('playersReceived', [])
+    notes = body.get('notes', '').strip()
+    
+    if not other_team:
+        return jsonify({'error': 'Other team is required'}), 400
+    
+    if not players_sent and not players_received:
+        return jsonify({'error': 'At least one player must be involved'}), 400
+    
+    # Check trade deadline
+    trade_deadline = state.get('tradeDeadline')
+    if trade_deadline:
+        from datetime import datetime, timezone
+        try:
+            deadline_dt = datetime.fromisoformat(trade_deadline.replace('Z', '+00:00'))
+            if datetime.now(timezone.utc) > deadline_dt:
+                return jsonify({'error': 'Trade deadline has passed'}), 400
+        except Exception:
+            pass
+    
+    # Create trade payload
+    payload = {
+        'fromTeam': my_team,
+        'toTeam': other_team,
+        'playersSent': players_sent,
+        'playersReceived': players_received,
+        'notes': notes,
+    }
+    
+    # Submit to pending queue
+    import uuid
+    req_id = str(uuid.uuid4())
+    submitted_at = datetime.now(timezone.utc).isoformat()
+    
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO pending_requests (id, type, payload, submitted_by, submitted_name, submitted_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (req_id, 'trade', json.dumps(payload), user['id'], manager.get('name', ''), submitted_at))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'ok': True, 'id': req_id})
+
+
 @user_portal_v2_bp.route('/api/v2/admin/links', methods=['GET'])
 @require_admin
 def admin_list_links():
