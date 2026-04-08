@@ -763,7 +763,6 @@ def propose_trade():
     # Check trade deadline
     trade_deadline = state.get('tradeDeadline')
     if trade_deadline:
-        from datetime import datetime, timezone
         try:
             deadline_dt = datetime.fromisoformat(trade_deadline.replace('Z', '+00:00'))
             if datetime.now(timezone.utc) > deadline_dt:
