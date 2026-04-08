@@ -486,6 +486,10 @@ async function handlePortalLogout() {
 async function submitPortalLink(ev) {
   ev.preventDefault();
   if (_portalBusy) return;
+  
+  // Small delay to ensure mobile browsers have updated select value
+  await new Promise(resolve => setTimeout(resolve, 50));
+  
   const managerId = $('portal-manager-select')?.value || '';
   const zamboniTag = $('portal-zamboni-tag')?.value.trim() || '';
   if (!managerId || !zamboniTag) {
@@ -673,7 +677,7 @@ function portalCardHTML() {
   const teamCode = _portalSession?.teamCode || '—';
   if (!_portalSession.linked) {
     const managerOptions = _portalLinkOptions.length
-      ? _portalLinkOptions.map(m => `<option value="${m.id}">${m.teamCode ? `${m.teamCode} · ` : ''}${m.name}</option>`).join('')
+      ? '<option value="">— Select your manager —</option>' + _portalLinkOptions.map(m => `<option value="${m.id}">${m.teamCode ? `${m.teamCode} · ` : ''}${m.name}</option>`).join('')
       : '<option value="">No available managers</option>';
     return `
       <div class="panel portal-panel">
