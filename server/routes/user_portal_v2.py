@@ -703,8 +703,9 @@ def get_my_roster():
     if not my_team:
         return jsonify({'error': 'You are not assigned to a team'}), 404
     
-    # Get roster for my team
-    roster = state.get('rosters', {}).get(my_team, [])
+    # Build roster from players list
+    players = state.get('players', [])
+    roster = [p['id'] for p in players if p.get('teamCode') == my_team]
     
     # Get other teams for trade partner selection
     other_teams = [

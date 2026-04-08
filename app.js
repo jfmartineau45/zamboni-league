@@ -687,14 +687,18 @@ async function showProposeTrade() {
 function openTradeProposalModal(data) {
   const { myTeam, roster, otherTeams } = data;
   
+  console.log('Trade data:', data); // Debug
+  
   const teamOptions = otherTeams.map(code => 
     `<option value="${code}">${code}</option>`
   ).join('');
   
-  const myPlayersList = roster.map(pid => {
-    const name = PLAYER_DB[pid] || `Player #${pid}`;
-    return `<label class="portal-checkbox-row"><input type="checkbox" class="trade-my-player" value="${pid}"> ${name}</label>`;
-  }).join('');
+  const myPlayersList = Array.isArray(roster) && roster.length
+    ? roster.map(pid => {
+        const name = PLAYER_DB[pid] || `Player #${pid}`;
+        return `<label class="portal-checkbox-row"><input type="checkbox" class="trade-my-player" value="${pid}"> ${name}</label>`;
+      }).join('')
+    : '<div class="text-dim">No players on roster</div>';
   
   showModal('🔄 Propose Trade', `
     <div class="form-row">
@@ -708,7 +712,7 @@ function openTradeProposalModal(data) {
     <div class="form-row">
       <label>Your players (${myTeam})</label>
       <div id="trade-my-players" style="max-height:200px;overflow-y:auto;border:1px solid #333;padding:8px;border-radius:4px">
-        ${myPlayersList || '<div class="text-dim">No players on roster</div>'}
+        ${myPlayersList}
       </div>
     </div>
     
