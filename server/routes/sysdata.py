@@ -13,6 +13,7 @@ sysdata_bp = Blueprint('sysdata', __name__)
 
 
 @sysdata_bp.route('/api/sysdata', methods=['GET'])
+@sysdata_bp.route('/api/sysdata/download', methods=['GET'])
 def download_sysdata():
     conn = get_conn()
     row = conn.execute("SELECT filename, data FROM sysdata_file WHERE id=1").fetchone()

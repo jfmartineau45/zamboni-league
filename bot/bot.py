@@ -7,7 +7,6 @@ or:
 """
 import sys
 import os
-import asyncio
 import logging
 
 import discord
@@ -18,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bot.config import DISCORD_TOKEN, GUILD_ID, ADMIN_PASSWORD
 from bot import auth
+from bot.posting_service import PostingService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,10 +28,8 @@ log = logging.getLogger('nhl-bot')
 
 EXTENSIONS = [
     'bot.commands.score',
-    'bot.commands.trade',
-    'bot.commands.standings',
-    'bot.commands.pending',
     'bot.commands.signup',
+    'bot.commands.sysdata',
 ]
 
 
@@ -39,7 +37,9 @@ class NHLBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True  # Required to fetch guild members
+        intents.message_content = True
         super().__init__(command_prefix='!', intents=intents)
+        self.posting_service: PostingService | None = None
 
     async def setup_hook(self):
         # Authenticate bot with admin password at startup
@@ -58,15 +58,10 @@ class NHLBot(commands.Bot):
             await self.load_extension(ext)
             log.info(f'Loaded {ext}')
 
-        # Sync slash commands to guild (instant) or globally (up to 1h delay)
-        if GUILD_ID:
-            guild = discord.Object(id=GUILD_ID)
-            self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-            log.info(f'Synced {len(synced)} command(s) to guild {GUILD_ID}')
-        else:
-            synced = await self.tree.sync()
-            log.info(f'Synced {len(synced)} command(s) globally')
+        log.info('Prefix commands enabled: !score, !signup, !rosters')
+
+        if not self.posting_service:
+            self.posting_service = PostingService(self)
 
     async def on_ready(self):
         log.info(f'Logged in as {self.user} (id={self.user.id})')
@@ -76,6 +71,11 @@ class NHLBot(commands.Bot):
                 name='the NHL Legacy League'
             )
         )
+
+    async def close(self):
+        if self.posting_service:
+            self.posting_service.stop()
+        await super().close()
 
 
 def main():

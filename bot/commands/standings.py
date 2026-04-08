@@ -79,58 +79,21 @@ class StandingsCog(commands.Cog):
     @app_commands.command(name='standings', description='Show current league standings (top 5 preview)')
     @app_commands.describe(conference='Filter by conference (East/West) — optional')
     async def standings(self, interaction: discord.Interaction, conference: str = ''):
-        await interaction.response.defer(thinking=True)
-
-        state = await get_state()
-        if not state:
-            await interaction.followup.send('Could not load league data.', ephemeral=True)
-            return
-
-        rows = _compute_standings(state)
-
+        target = f'{config.APP_URL}/#standings'
         if conference:
-            conf_filter = conference.strip().upper()
-            conf_codes = set()
-            for t in state.get('teams', []):
-                tc   = (t.get('conference') or '').upper()
-                code = t.get('code') or t.get('id', '')
-                if conf_filter in tc:
-                    conf_codes.add(code)
-            rows = [r for r in rows if r['code'] in conf_codes]
-
-        if not rows:
-            await interaction.followup.send('No standings data yet.', ephemeral=True)
-            return
-
-        league_name = state.get('league', {}).get('name', 'NHL Legacy League')
-        owners      = state.get('teamOwners', {})
-        managers    = {m['id']: m['name'] for m in state.get('managers', [])}
-        played      = sum(1 for g in state.get('games', []) if g.get('played'))
-        total_games = len(state.get('games', []))
-
-        title = f'📊  {league_name}'
-        if conference:
-            title += f'  ·  {conference.title()}'
-
-        embed = discord.Embed(title=title, color=SITE_RED)
-
-        # Top-5 teaser — rank, team, pts only. Full stats live on the site.
-        medals = {1: '🥇', 2: '🥈', 3: '🥉'}
-        lines  = []
-        for i, r in enumerate(rows[:5], 1):
-            mgr_id = owners.get(r['code'], '')
-            mgr    = managers.get(mgr_id, '')
-            medal  = medals.get(i, f'**{i}.**')
-            mgr_str = f'  *{mgr}*' if mgr else ''
-            lines.append(f"{medal}  **{r['code']}**  —  {r['pts']} pts{mgr_str}")
-
-        if len(rows) > 5:
-            lines.append(f'*… and {len(rows) - 5} more teams*')
-
-        embed.description = '\n'.join(lines)
-        embed.set_footer(text=f'{played} of {total_games} games played  ·  Full stats on the site')
-
-        await interaction.followup.send(embed=embed, view=_website_view())
+            target = f'{config.APP_URL}/#standings'
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(
+            label='Open Website Standings',
+            style=discord.ButtonStyle.link,
+            url=target,
+        ))
+        await interaction.response.send_message(
+            '📊 **Standings now live on the website.**\n'
+            'Open the site for the full standings table, power rankings, and team stats.',
+            view=view,
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot):

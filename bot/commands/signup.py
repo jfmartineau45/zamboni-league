@@ -1,25 +1,13 @@
 """
-commands/signup.py — /signup command
-Lets players self-register their Discord account + RPCN Account.
+commands/signup.py — website-first /signup command
 
-Flow:
-  Step 1: Select "Who are you?" dropdown (managers without discordId, or yourself)
-  Step 2: Modal — enter RPCN Account (only thing the player types)
-  Step 3: POST linkAccount → admin approves → discordId + zamboniTag saved
+The Discord bot no longer hosts account linking. Players are directed to the
+website portal to sign in with Discord and link their manager account there.
 """
-import logging
-
 import discord
-from discord import app_commands
 from discord.ext import commands
 
-from bot.api import api_get, api_post, api_patch, get_state, get_discord_config
-from bot.auth import get_token
 import bot.config as config
-
-log = logging.getLogger('nhl-bot')
-
-GOLD = discord.Color.from_rgb(200, 168, 78)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -286,45 +274,27 @@ class ManagerSelectView(discord.ui.View):
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
+class SignupPortalView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(discord.ui.Button(
+            label='Open Player Portal',
+            style=discord.ButtonStyle.link,
+            url=f"{config.APP_URL}/?portal=1",
+        ))
+
+
 class SignupCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(
-        name='signup',
-        description='Link your Discord account and RPCN Account to the league',
-    )
-    async def signup(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-
-        state = await get_state()
-        if not state:
-            await interaction.followup.send(
-                '❌ Could not reach the league server. Try again later.', ephemeral=True
-            )
-            return
-
-        discord_id = str(interaction.user.id)
-        managers = _unlinked_managers(state, discord_id)
-
-        if not managers:
-            await interaction.followup.send(
-                '✅ All managers are already linked.\n'
-                'If you need to update your RPCN Account, contact the admin.',
-                ephemeral=True,
-            )
-            return
-
-        truncated = len(managers) > 25
-        view = ManagerSelectView(managers, self.bot)
-        note = (
-            '\n*More than 25 managers available — if your name isn\'t listed, ask the admin to add it manually.*'
-            if truncated else ''
-        )
-        await interaction.followup.send(
-            f'**Who are you?** Pick your manager name below:{note}',
-            view=view,
-            ephemeral=True,
+    @commands.command(name='signup')
+    async def signup(self, ctx: commands.Context):
+        await ctx.reply(
+            "🔗 **Account linking is now website-first.**\n"
+            "Open the player portal, sign in with Discord, and link your manager"
+            " account plus RPCN tag there.",
+            view=SignupPortalView(),
         )
 
 

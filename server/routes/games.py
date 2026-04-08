@@ -7,10 +7,24 @@ import json
 import os
 from flask import Blueprint, request, jsonify
 from server.db import get_conn
+from server.routes.bot_events import queue_score_event
 
 games_bp = Blueprint('games', __name__)
 
 # Full NHL team name lookup (matches app.js NHL_TEAMS)
+
+def _is_admin_request():
+    from server.routes.auth import check_auth
+    ok, _ = check_auth()
+    return ok
+
+def _check_bot_secret():
+    secret = os.environ.get('NHL_BOT_SECRET', '')
+    if secret and request.headers.get('X-Bot-Secret', '') != secret:
+        return False
+    return True
+
+
 _TEAM_NAMES = {
     "ANA":"Anaheim Ducks","WPG":"Winnipeg Jets","BOS":"Boston Bruins","BUF":"Buffalo Sabres",
     "CGY":"Calgary Flames","CAR":"Carolina Hurricanes","CHI":"Chicago Blackhawks",
@@ -82,7 +96,7 @@ def bot_score():
     Body: { gameId, homeScore, awayScore, ot }
     OR:   { homeTeam, awayTeam, homeScore, awayScore, ot } — finds game by teams
     """
-    if not _check_bot_secret():
+    if not _check_bot_secret() and not _is_admin_request():
         return jsonify({'error': 'Forbidden'}), 403
 
     body = request.get_json(force=True) or {}
@@ -145,5 +159,11 @@ def bot_score():
     )
     conn.commit()
     conn.close()
+
+    queue_score_event(game, {
+        'source': 'bot_score_api',
+        'submittedBy': body.get('submittedBy'),
+        'submittedName': body.get('submittedName'),
+    })
 
     return jsonify({'ok': True, 'game': game})

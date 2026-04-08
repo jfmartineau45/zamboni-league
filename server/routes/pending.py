@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from server.db import get_conn
 from server.routes.auth import require_admin
+from server.routes.bot_events import queue_score_event, queue_trade_event
 
 pending_bp = Blueprint('pending', __name__)
 
@@ -100,34 +101,54 @@ def review_pending(req_id):
         SET status=?, reviewed_at=?, notes=?
         WHERE id=?
     """, (status, reviewed_at, notes, req_id))
+    conn.commit()
+    conn.close()
 
     result = {'ok': True, 'status': status}
 
-    # If approved, apply the change to league state
+    # If approved, apply the change to league state (fresh connection — avoids lock contention)
     if action == 'approve':
         payload = json.loads(row['payload'])
         req_type = row['type']
-        state_row = conn.execute("SELECT data FROM league_state WHERE id=1").fetchone()
-        if state_row:
-            try:
+        try:
+            conn2 = get_conn()
+            state_row = conn2.execute("SELECT data FROM league_state WHERE id=1").fetchone()
+            if state_row:
                 state = json.loads(state_row['data'])
+                updated_game = None
+                applied_trade = None
                 if req_type == 'score':
-                    _apply_score(state, payload)
+                    updated_game = _apply_score(state, payload)
                 elif req_type == 'trade':
-                    _apply_trade(state, payload)
+                    applied_trade = _apply_trade(state, payload)
                 elif req_type == 'linkAccount':
                     _apply_link_account(state, payload)
-                conn.execute(
+                conn2.execute(
                     "UPDATE league_state SET data=?, updated=datetime('now') WHERE id=1",
                     (json.dumps(state),)
                 )
+                conn2.commit()
+                conn2.close()
+                if req_type == 'score' and updated_game:
+                    queue_score_event(updated_game, {
+                        'source': 'pending_request',
+                        'pendingRequestId': req_id,
+                        'submittedBy': row['submitted_by'],
+                        'submittedName': row['submitted_name'],
+                    })
+                if req_type == 'trade' and applied_trade:
+                    queue_trade_event(applied_trade, {
+                        'source': 'pending_request',
+                        'pendingRequestId': req_id,
+                        'approvedBy': row['reviewed_by'] or 'admin',
+                    })
                 result['applied'] = True
-            except Exception as e:
-                result['applied'] = False
-                result['error'] = str(e)
+            else:
+                conn2.close()
+        except Exception as e:
+            result['applied'] = False
+            result['error'] = str(e)
 
-    conn.commit()
-    conn.close()
     return jsonify(result)
 
 
@@ -156,7 +177,7 @@ def _apply_score(state, payload):
             # If it's a playoff game, recalculate the bracket
             if g.get('playoff'):
                 _recalc_playoff_bracket(state)
-            return
+            return g
     raise ValueError(f"Game {game_id} not found")
 
 
@@ -322,3 +343,4 @@ def _apply_trade(state, payload):
     }
     state.setdefault('trades', []).insert(0, trade)
     _apply_trade_history(state)
+    return trade

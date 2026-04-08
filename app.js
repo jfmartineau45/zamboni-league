@@ -213,13 +213,20 @@ let state = defaultState();
 let isAdmin = false;
 let currentSection = 'dashboard';
 let _adminToken = sessionStorage.getItem('nhl-admin-token') || '';
+let _portalSession = { user: null, linked: false, manager: null, teamCode: null, currentWeek: null };
+let _portalGames = [];
+let _portalLinkOptions = [];
+let _portalBusy = false;
+let _portalMatchCache = {};
 let _apiAvailable = false;    // true once we've successfully talked to /api/state
 let _zamboniPlayers = null;   // cached gamertag list from /api/zamboni/players
 let _zbCache     = null;      // cached { tagMap, gameMap, mgrRecord } for box scores
 let _zbCacheAt   = 0;
 const _ZB_TTL        = 30 * 60 * 1000; // 30-min in-memory cache
 const _ZB_SS_KEY     = 'nhl_zb_cache';  // sessionStorage key
-let _statSort        = { col: 'pts', dir: -1 }; // Stats leaderboard sort state
+const _PORTAL_MATCH_CACHE_KEY = 'nhl_portal_match_cache';
+const _PORTAL_MATCH_CACHE_TTL = 10 * 60 * 1000;
+const _statSort        = { col: 'pts', dir: -1 }; // Stats leaderboard sort state
 let _settingsSection = null;                  // null = menu, string = active section id
 
 function normalizeSysDataFile(file) {
@@ -239,6 +246,531 @@ async function _apiFetch(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   if (_adminToken) headers['Authorization'] = `Bearer ${_adminToken}`;
   return fetch(path, { ...opts, headers });
+}
+
+async function _portalFetch(path, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  const hasBody = opts.body !== undefined && opts.body !== null;
+  if (hasBody && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  return fetch(path, { ...opts, headers });
+}
+
+function loadPortalMatchCache() {
+  try {
+    const raw = sessionStorage.getItem(_PORTAL_MATCH_CACHE_KEY);
+    if (!raw) {
+      _portalMatchCache = {};
+      return _portalMatchCache;
+    }
+    const parsed = JSON.parse(raw);
+    const now = Date.now();
+    _portalMatchCache = Object.fromEntries(
+      Object.entries(parsed || {}).filter(([, value]) => value?.at && now - value.at < _PORTAL_MATCH_CACHE_TTL)
+    );
+    return _portalMatchCache;
+  } catch {
+    _portalMatchCache = {};
+    return _portalMatchCache;
+  }
+}
+
+function savePortalMatchCache() {
+  try {
+    sessionStorage.setItem(_PORTAL_MATCH_CACHE_KEY, JSON.stringify(_portalMatchCache));
+  } catch {}
+}
+
+function getCachedPortalMatches(gameId) {
+  const entry = _portalMatchCache[String(gameId)];
+  if (!entry) return null;
+  if (Date.now() - entry.at >= _PORTAL_MATCH_CACHE_TTL) {
+    delete _portalMatchCache[String(gameId)];
+    savePortalMatchCache();
+    return null;
+  }
+  return entry.data || null;
+}
+
+function setCachedPortalMatches(gameId, data) {
+  _portalMatchCache[String(gameId)] = { at: Date.now(), data };
+  savePortalMatchCache();
+}
+
+async function loadPortalSession() {
+  try {
+    const r = await _portalFetch('/api/v2/user/session');
+    if (!r.ok) {
+      _portalSession = { user: null, linked: false, manager: null, teamCode: null, currentWeek: null };
+      _portalGames = [];
+      _portalLinkOptions = [];
+      return _portalSession;
+    }
+    _portalSession = await r.json();
+    if (_portalSession?.linked) await loadPortalGames();
+    else _portalGames = [];
+    return _portalSession;
+  } catch {
+    _portalSession = { user: null, linked: false, manager: null, teamCode: null, currentWeek: null };
+    _portalGames = [];
+    _portalLinkOptions = [];
+    return _portalSession;
+  }
+}
+
+async function loadZamboniPlayers() {
+  if (Array.isArray(_zamboniPlayers) && _zamboniPlayers.length) return _zamboniPlayers;
+  try {
+    const r = await _portalFetch('/api/zamboni/players');
+    const body = await r.json().catch(() => ([]));
+    if (!r.ok || !Array.isArray(body)) {
+      _zamboniPlayers = [];
+      return _zamboniPlayers;
+    }
+    _zamboniPlayers = body
+      .map(item => typeof item === 'string' ? item : (item?.gamertag || item?.name || ''))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+    return _zamboniPlayers;
+  } catch {
+    _zamboniPlayers = [];
+    return _zamboniPlayers;
+  }
+}
+
+function rpcnAutocompleteMatches(query) {
+  const q = (query || '').trim().toLowerCase();
+  if (!q || !_zamboniPlayers?.length) return [];
+  const starts = [];
+  const contains = [];
+  for (const tag of _zamboniPlayers) {
+    const lower = tag.toLowerCase();
+    if (lower.startsWith(q)) starts.push(tag);
+    else if (lower.includes(q)) contains.push(tag);
+    if (starts.length + contains.length >= 8) break;
+  }
+  return [...starts, ...contains].slice(0, 8);
+}
+
+function renderRpcnAutocomplete(query) {
+  const drop = $('portal-rpcn-drop');
+  const status = $('portal-rpcn-status');
+  if (!drop) return;
+  const matches = rpcnAutocompleteMatches(query);
+  const clean = (query || '').trim();
+  if (!clean) {
+    drop.classList.remove('open');
+    drop.innerHTML = '';
+    if (status) status.textContent = 'Start typing your RPCN account for suggestions.';
+    return;
+  }
+  if (!matches.length) {
+    drop.classList.remove('open');
+    drop.innerHTML = '';
+    if (status) status.textContent = _zamboniPlayers?.length ? 'No matching RPCN account found yet.' : 'RPCN suggestions unavailable right now.';
+    return;
+  }
+  drop.innerHTML = matches.map(tag => `<button type="button" class="zamboni-option" data-tag="${tag.replace(/"/g, '&quot;')}">${tag}</button>`).join('');
+  drop.classList.add('open');
+  if (status) status.textContent = `${matches.length} suggestion${matches.length === 1 ? '' : 's'} found.`;
+  drop.querySelectorAll('.zamboni-option').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const input = $('portal-zamboni-tag');
+      if (!input) return;
+      input.value = btn.dataset.tag || '';
+      drop.classList.remove('open');
+      drop.innerHTML = '';
+      if (status) status.textContent = `Selected RPCN account: ${input.value}`;
+      input.focus();
+    });
+  });
+}
+
+async function loadPortalGames() {
+  if (!_portalSession?.user || !_portalSession?.linked) {
+    _portalGames = [];
+    return [];
+  }
+  try {
+    const r = await _portalFetch('/api/v2/me/score/games');
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      _portalGames = [];
+      return [];
+    }
+    _portalGames = Array.isArray(body.games) ? body.games : [];
+    if (body.manager) _portalSession.manager = body.manager;
+    if (body.teamCode) _portalSession.teamCode = body.teamCode;
+    if (body.currentWeek != null) _portalSession.currentWeek = body.currentWeek;
+    prefetchPortalMatches(_portalGames);
+    return _portalGames;
+  } catch {
+    _portalGames = [];
+    return [];
+  }
+}
+
+async function fetchPortalMatches(gameId, { preferCache = true } = {}) {
+  if (preferCache) {
+    const cached = getCachedPortalMatches(gameId);
+    if (cached) return cached;
+  }
+  const r = await _portalFetch(`/api/v2/me/score/matches/${encodeURIComponent(gameId)}`);
+  const body = await r.json().catch(() => ({}));
+  if (r.ok) setCachedPortalMatches(gameId, body);
+  return { ...body, _ok: r.ok, _status: r.status };
+}
+
+function prefetchPortalMatches(games = []) {
+  if (!_portalSession?.linked || !Array.isArray(games) || !games.length) return;
+  const targets = games.slice(0, 5).filter(g => !getCachedPortalMatches(g.id));
+  targets.forEach(g => {
+    fetchPortalMatches(g.id, { preferCache: true }).catch(() => null);
+  });
+}
+
+async function loadPortalLinkOptions() {
+  if (!_portalSession?.user) {
+    _portalLinkOptions = [];
+    return [];
+  }
+  try {
+    const r = await _portalFetch('/api/v2/me/link-options');
+    const body = await r.json().catch(() => ({}));
+    _portalLinkOptions = r.ok && Array.isArray(body.managers) ? body.managers : [];
+    return _portalLinkOptions;
+  } catch {
+    _portalLinkOptions = [];
+    return [];
+  }
+}
+
+function portalDisplayName() {
+  return _portalSession?.user?.globalName || _portalSession?.user?.username || 'Discord user';
+}
+
+function portalAvatar() {
+  return _portalSession?.user?.avatar || _portalSession?.manager?.discordAvatar || '';
+}
+
+function portalGameLabel(g) {
+  const week = g.week || '?';
+  if (week >= 100) {
+    const round = g.roundLabel || `Playoffs Rd ${week - 99}`;
+    return `${round}${g.notes ? ` · ${g.notes}` : ''}`;
+  }
+  return `Week ${week}`;
+}
+
+function portalGameSummary(g) {
+  return `${g.homeTeam} vs ${g.awayTeam}`;
+}
+
+async function startPortalLogin(next = '/?portal=1') {
+  window.location.href = `/api/v2/oauth/discord/start?next=${encodeURIComponent(next)}`;
+}
+
+async function handlePortalLogout() {
+  try {
+    await _portalFetch('/api/v2/user/logout', { method: 'POST' });
+  } catch {}
+  _portalSession = { user: null, linked: false, manager: null, teamCode: null, currentWeek: null };
+  _portalGames = [];
+  _portalLinkOptions = [];
+  _portalMatchCache = {};
+  savePortalMatchCache();
+  updatePortalUI();
+  renderSection(currentSection);
+  toast('Signed out', 'info');
+}
+
+async function submitPortalLink(ev) {
+  ev.preventDefault();
+  if (_portalBusy) return;
+  const managerId = $('portal-manager-select')?.value || '';
+  const zamboniTag = $('portal-zamboni-tag')?.value.trim() || '';
+  if (!managerId || !zamboniTag) {
+    toast('Pick your manager and enter your RPCN account', 'error');
+    return;
+  }
+  _portalBusy = true;
+  try {
+    const r = await _portalFetch('/api/v2/me/link-manager', {
+      method: 'POST',
+      body: JSON.stringify({ managerId, zamboniTag }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      toast(body.error || 'Could not link account', 'error');
+      return;
+    }
+    await loadPortalSession();
+    updatePortalUI();
+    renderSection(currentSection);
+    toast('Account linked — you can submit scores now', 'success');
+  } finally {
+    _portalBusy = false;
+  }
+}
+
+function openPortalScoreModal(gameId) {
+  const game = _portalGames.find(g => String(g.id) === String(gameId));
+  if (!game) {
+    toast('Game not found', 'error');
+    return;
+  }
+  openPortalManualScoreModal(game);
+}
+
+function openPortalManualScoreModal(game) {
+  showModal(`Submit Score — ${portalGameSummary(game)}`, `
+    <div class="form-row">
+      <label>${game.homeTeam} score</label>
+      <input type="number" id="portal-home-score" min="0" max="99" inputmode="numeric" placeholder="3">
+    </div>
+    <div class="form-row">
+      <label>${game.awayTeam} score</label>
+      <input type="number" id="portal-away-score" min="0" max="99" inputmode="numeric" placeholder="1">
+    </div>
+    <div class="form-row">
+      <label class="portal-checkbox-row"><input type="checkbox" id="portal-ot-check"> Overtime / shootout</label>
+    </div>
+    <div class="portal-score-meta">
+      <div>${portalGameLabel(game)}</div>
+      <div>${game.homeManagerName || '—'} vs ${game.awayManagerName || '—'}</div>
+    </div>
+    <button id="modal-ok" class="btn btn-primary btn-block mt-12">Submit Score</button>
+  `, async () => {
+    const hs = parseInt($('portal-home-score')?.value, 10);
+    const as = parseInt($('portal-away-score')?.value, 10);
+    const ot = !!$('portal-ot-check')?.checked;
+    if (!Number.isFinite(hs) || !Number.isFinite(as)) {
+      toast('Enter both scores', 'error');
+      return;
+    }
+    if (hs === as) {
+      toast('Scores cannot be tied', 'error');
+      return;
+    }
+    const btn = $('modal-ok');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Submitting…';
+    }
+    try {
+      await submitPortalScorePayload({ gameId: game.id, homeScore: hs, awayScore: as, ot });
+      hideModal();
+    } catch {
+      toast('Could not submit score', 'error');
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Submit Score';
+      }
+    }
+  });
+}
+
+async function submitPortalScorePayload(payload) {
+  const r = await _portalFetch('/api/v2/me/score', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    throw new Error(body.error || 'Could not submit score');
+  }
+  state = await loadState();
+  await loadPortalSession();
+  updatePortalUI();
+  renderSection(currentSection);
+  toast('Score submitted successfully', 'success');
+  return body;
+}
+
+function openPortalZamboniMatchModal(game, matchData) {
+  const matches = Array.isArray(matchData?.matches) ? matchData.matches : [];
+  const options = matches.map(m => `<option value="${m.gameId}">${m.label}</option>`).join('');
+  showModal(`Pick Zamboni Match — ${portalGameSummary(game)}`, `
+    <div class="portal-score-meta" style="margin-bottom:10px">
+      <div>${matchData.homeTag} vs ${matchData.awayTag}</div>
+      <div>${matches.length} Zamboni match${matches.length === 1 ? '' : 'es'} found</div>
+    </div>
+    <div class="form-row">
+      <label>Zamboni match</label>
+      <select id="portal-zamboni-match-select">${options}</select>
+    </div>
+    <div class="form-row">
+      <label class="portal-checkbox-row"><input type="checkbox" id="portal-zamboni-ot-check"> Mark as overtime / shootout</label>
+    </div>
+    <button id="modal-ok" class="btn btn-primary btn-block mt-12">Use This Match</button>
+    <button id="portal-manual-fallback-btn" class="btn btn-ghost btn-block mt-8" type="button">Enter Score Manually</button>
+  `, async () => {
+    const selected = $('portal-zamboni-match-select')?.value;
+    const match = matches.find(m => String(m.gameId) === String(selected));
+    if (!match) {
+      toast('Pick a Zamboni match', 'error');
+      return;
+    }
+    const btn = $('modal-ok');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Submitting…';
+    }
+    try {
+      await submitPortalScorePayload({
+        gameId: game.id,
+        homeScore: match.homeScore,
+        awayScore: match.awayScore,
+        ot: !!$('portal-zamboni-ot-check')?.checked,
+        zamboniGameId: match.gameId,
+        zamboniStats: match.zamboniStats,
+      });
+      hideModal();
+    } catch (err) {
+      toast(err.message || 'Could not submit score', 'error');
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Use This Match';
+      }
+    }
+  });
+  const otCheck = $('portal-zamboni-ot-check');
+  if (otCheck) otCheck.checked = false;
+  $('portal-manual-fallback-btn')?.addEventListener('click', () => openPortalManualScoreModal(game));
+}
+
+async function handlePortalGamePick(gameId) {
+  const game = _portalGames.find(g => String(g.id) === String(gameId));
+  if (!game) {
+    toast('Game not found', 'error');
+    return;
+  }
+  try {
+    const body = await fetchPortalMatches(game.id, { preferCache: true });
+    if (body._ok !== false && Array.isArray(body.matches) && body.matches.length) {
+      openPortalZamboniMatchModal(game, body);
+      return;
+    }
+  } catch {}
+  openPortalManualScoreModal(game);
+}
+
+function portalCardHTML() {
+  if (!_portalSession?.user) {
+    return `
+      <div class="panel portal-panel portal-panel-cta">
+        <div class="conf-header">
+          <span class="conf-title">🏒 Player Portal</span>
+          <span class="conf-sub">Fast mobile score submission</span>
+        </div>
+        <div class="panel-body portal-panel-body">
+          <p class="portal-copy">Sign in with Discord to link your manager account, view your games, and submit scores from your phone.</p>
+          <button class="btn btn-primary btn-block" id="portal-login-btn">Sign Up with Discord</button>
+        </div>
+      </div>`;
+  }
+  const avatar = portalAvatar();
+  const managerNameText = _portalSession?.manager?.name || 'Not linked yet';
+  const teamCode = _portalSession?.teamCode || '—';
+  if (!_portalSession.linked) {
+    const managerOptions = _portalLinkOptions.length
+      ? _portalLinkOptions.map(m => `<option value="${m.id}">${m.teamCode ? `${m.teamCode} · ` : ''}${m.name}</option>`).join('')
+      : '<option value="">No available managers</option>';
+    return `
+      <div class="panel portal-panel">
+        <div class="conf-header">
+          <span class="conf-title">🔗 Link Your Team</span>
+          <span class="conf-sub">Required before score submission</span>
+        </div>
+        <div class="panel-body portal-panel-body">
+          <div class="portal-user-row">
+            ${avatar ? `<img src="${avatar}" alt="" class="portal-avatar">` : '<div class="portal-avatar portal-avatar-fallback">D</div>'}
+            <div>
+              <div class="portal-user-name">${portalDisplayName()}</div>
+              <div class="portal-user-sub">Signed in with Discord</div>
+            </div>
+          </div>
+          <form id="portal-link-form" class="portal-link-form">
+            <div class="form-row">
+              <label>Manager</label>
+              <select id="portal-manager-select">${managerOptions}</select>
+            </div>
+            <div class="form-row">
+              <label>RPCN Account</label>
+              <div class="zamboni-wrap">
+                <input type="text" id="portal-zamboni-tag" placeholder="Enter your RPCN account" autocomplete="off" autocapitalize="off" spellcheck="false">
+                <div id="portal-rpcn-drop" class="zamboni-drop"></div>
+              </div>
+              <div id="portal-rpcn-status" class="portal-rpcn-status">Start typing your RPCN account for suggestions.</div>
+            </div>
+            <button class="btn btn-primary btn-block" type="submit">Link Account</button>
+          </form>
+          <button class="btn btn-ghost btn-block" id="portal-logout-btn">Sign Out</button>
+        </div>
+      </div>`;
+  }
+  const standings = calcStandings();
+  const teamSt = standings.find(s => s.teamCode === teamCode);
+  const record = teamSt ? `${teamSt.w}-${teamSt.l}${teamSt.ot ? '-' + teamSt.ot : ''}` : '—';
+  const teamLogo = teamCode ? teamLogoLg(teamCode, 48) : '';
+  const gamesHtml = _portalGames.length
+    ? _portalGames.slice(0, 6).map(g => `
+      <button class="portal-game-card" data-game-id="${g.id}">
+        <div class="portal-game-top">
+          <span class="portal-game-week">${portalGameLabel(g)}</span>
+          <span class="portal-game-action">Submit</span>
+        </div>
+        <div class="portal-game-matchup">${g.homeTeam} vs ${g.awayTeam}</div>
+        <div class="portal-game-sub">${g.homeManagerName || '—'} vs ${g.awayManagerName || '—'}</div>
+      </button>`).join('')
+    : '<div class="empty-state"><span class="empty-icon">✅</span>No eligible games to submit right now</div>';
+  return `
+    <div class="panel portal-panel">
+      <div class="conf-header">
+        <span class="conf-title">📱 My Score Portal</span>
+        <span class="conf-sub">Optimized for quick mobile submissions</span>
+      </div>
+      <div class="panel-body portal-panel-body">
+        <div class="portal-user-row">
+          ${avatar ? `<img src="${avatar}" alt="" class="portal-avatar">` : '<div class="portal-avatar portal-avatar-fallback">D</div>'}
+          <div class="portal-user-meta">
+            <div class="portal-user-name">${portalDisplayName()}</div>
+            <div class="portal-user-sub">${managerNameText} · ${teamCode}</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="portal-logout-btn">Sign Out</button>
+        </div>
+        <div class="portal-team-banner">
+          <div class="portal-team-logo">${teamLogo}</div>
+          <div class="portal-team-info">
+            <div class="portal-team-code">${teamCode}</div>
+            <div class="portal-team-record">${record}</div>
+          </div>
+          <div class="portal-team-stats">
+            <div class="portal-mini-stat"><span class="portal-mini-stat-value">${_portalGames.length}</span><span class="portal-mini-stat-label">Eligible</span></div>
+            <div class="portal-mini-stat"><span class="portal-mini-stat-value">${_portalSession.currentWeek || '—'}</span><span class="portal-mini-stat-label">Week</span></div>
+          </div>
+        </div>
+        <div class="portal-games-stack">${gamesHtml}</div>
+      </div>
+    </div>`;
+}
+
+function bindPortalDashboardActions() {
+  $('portal-login-btn')?.addEventListener('click', () => startPortalLogin('/?portal=1'));
+  $('portal-logout-btn')?.addEventListener('click', handlePortalLogout);
+  $('portal-link-form')?.addEventListener('submit', submitPortalLink);
+  const rpcnInput = $('portal-zamboni-tag');
+  const rpcnDrop = $('portal-rpcn-drop');
+  if (rpcnInput) {
+    loadZamboniPlayers().then(() => renderRpcnAutocomplete(rpcnInput.value));
+    rpcnInput.addEventListener('input', () => renderRpcnAutocomplete(rpcnInput.value));
+    rpcnInput.addEventListener('focus', () => renderRpcnAutocomplete(rpcnInput.value));
+    rpcnInput.addEventListener('blur', () => {
+      setTimeout(() => rpcnDrop?.classList.remove('open'), 120);
+    });
+  }
+  document.querySelectorAll('.portal-game-card').forEach(btn => {
+    btn.addEventListener('click', () => handlePortalGamePick(btn.dataset.gameId));
+  });
 }
 
 function clearAdminSession({ rerender = false } = {}) {
@@ -831,6 +1363,10 @@ function renderDashboard() {
       <button class="btn btn-accent" id="dl-sysdata-btn">⬇ Download</button>
     </div>` : ''}
 
+    <div class="portal-dashboard-slot">
+      ${portalCardHTML()}
+    </div>
+
     <!-- PANELS -->
     <div class="dash-panels">
 
@@ -1011,6 +1547,7 @@ function renderDashboard() {
 
     </div>
   `;
+  bindPortalDashboardActions();
   $('dl-sysdata-btn')?.addEventListener('click', downloadSysData);
   $('set-week-btn')?.addEventListener('click', () => showSetWeekModal(currentWeek, autoWeek));
 }
@@ -1928,6 +2465,11 @@ function showEnterScore(g) {
     renderSchedule();
     if (g.playoff && currentSection === 'playoffs') renderPlayoffs();
     toast('Score saved!', 'success');
+    _apiFetch('/api/admin/bot/score-event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(g),
+    }).catch(() => {});
   });
 }
 
@@ -2707,16 +3249,22 @@ function showNewTrade() {
     if (fromTeam === toTeam) { toast('Teams must differ', 'error'); return; }
     const give = [...document.querySelectorAll('#trade-give-list input:checked')].map(c => c.dataset.name);
     const recv = [...document.querySelectorAll('#trade-recv-list input:checked')].map(c => c.dataset.name);
-    state.trades.push({
+    const tradeRecord = {
       id: uid(), date: $('trade-date').value,
       fromTeam, toTeam, playersSent: give, playersReceived: recv,
       notes: $('trade-notes').value,
-    });
+    };
+    state.trades.push(tradeRecord);
     applyTradeHistory();
     saveState();
     hideModal();
     renderTrades();
     toast('Trade recorded!', 'success');
+    _apiFetch('/api/bot/trade', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(tradeRecord),
+    }).catch(() => {});
   });
 
   const fillList = (teamCode, listId) => {
@@ -2944,10 +3492,17 @@ function enterPlayoffGame(ri, si) {
       notes: `${round.name} – Game ${gameNum}`,
     });
 
+    const savedGame = state.games[state.games.length - 1];
+
     recalcPlayoffBracket();
     hideModal();
     renderPlayoffs();
     toast('Playoff game saved!', 'success');
+    _apiFetch('/api/admin/bot/score-event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(savedGame),
+    }).catch(() => {});
   });
 }
 
@@ -4498,6 +5053,45 @@ function updateAdminUI() {
   $('admin-toggle-btn').textContent = isAdmin ? 'Logout' : 'Admin Login';
 }
 
+function updatePortalUI() {
+  $('portal-badge')?.classList.toggle('hidden', !_portalSession?.linked);
+  if ($('portal-toggle-btn')) {
+    $('portal-toggle-btn').textContent = _portalSession?.user
+      ? (_portalSession?.linked ? 'My Scores' : 'Finish Signup')
+      : 'Player Login';
+  }
+}
+
+function handlePortalToggle() {
+  navigate('dashboard');
+  const slot = document.querySelector('.portal-dashboard-slot');
+  if (slot) slot.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (_portalSession?.user) return;
+  startPortalLogin('/?portal=1');
+}
+
+function handlePortalQueryParams() {
+  const params = new URLSearchParams(window.location.search);
+  const wantsPortal = params.get('portal') === '1';
+  const portalError = params.get('portalError');
+  if (portalError) {
+    toast('Discord sign-in failed. Please try again.', 'error');
+  }
+  if (wantsPortal) {
+    navigate('dashboard');
+    setTimeout(() => {
+      const slot = document.querySelector('.portal-dashboard-slot');
+      if (slot) slot.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
+  }
+  if (wantsPortal || portalError) {
+    params.delete('portal');
+    params.delete('portalError');
+    const next = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}${window.location.hash || ''}`;
+    window.history.replaceState({}, '', next);
+  }
+}
+
 function handleAdminToggle() {
   if (isAdmin) {
     clearAdminSession({ rerender: true });
@@ -4537,8 +5131,11 @@ function handleAdminToggle() {
 async function init() {
   // Load state from API (or localStorage fallback) before rendering anything
   state = await loadState();
+  loadPortalMatchCache();
 
   await verifyAdminSession();
+  await loadPortalSession();
+  if (_portalSession?.user && !_portalSession?.linked) await loadPortalLinkOptions();
 
   // Navigation
   document.querySelectorAll('.nav-btn').forEach(btn => {
@@ -4562,6 +5159,7 @@ async function init() {
 
   // Admin toggle
   $('admin-toggle-btn').addEventListener('click', handleAdminToggle);
+  $('portal-toggle-btn').addEventListener('click', handlePortalToggle);
 
   // Set league title
   $('league-title').textContent = state.league.name || 'NHL Legacy League';
@@ -4569,6 +5167,8 @@ async function init() {
   // Render initial section
   renderSection('dashboard');
   updateAdminUI();
+  updatePortalUI();
+  handlePortalQueryParams();
 
   // Auto-fetch NHL rosters if never loaded, or stale (>30 days)
   const lastFetch = state._lastRosterFetch || 0;

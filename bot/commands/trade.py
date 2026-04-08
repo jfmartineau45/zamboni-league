@@ -259,38 +259,17 @@ class TradeCog(commands.Cog):
         to_team=_team_ac,
     )
     async def trade(self, interaction: discord.Interaction, from_team: str, to_team: str):
-        if not _is_admin(interaction):
-            await interaction.response.send_message(
-                '🔒 Trade entry is admin-only.', ephemeral=True
-            )
-            return
-        
-        # Load data
-        teams = await get_teams()
-        state = await get_state()
-        from_team = from_team.upper().strip()
-        to_team = to_team.upper().strip()
-
-        valid_codes = {str(t.get('code', '')).upper() for t in teams}
-        if from_team not in valid_codes or to_team not in valid_codes:
-            await interaction.response.send_message(
-                'Choose valid teams from the autocomplete list.',
-                ephemeral=True,
-            )
-            return
-
-        if from_team == to_team:
-            await interaction.response.send_message(
-                'From and To teams must be different.',
-                ephemeral=True,
-            )
-            return
-        
-        view = PlayerSelectView(from_team, to_team, teams, state, self.bot)
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(
+            label='Open Trade Hub',
+            style=discord.ButtonStyle.link,
+            url=f'{config.APP_URL}/#trades',
+        ))
         await interaction.response.send_message(
-            f'**{from_team}** ↔ **{to_team}**\n\nSelect the players to trade:',
+            '🔄 **Trade workflows are now website-first.**\n'
+            'Use the website trade hub to create, review, and manage trades.',
             view=view,
-            ephemeral=True
+            ephemeral=True,
         )
 
 

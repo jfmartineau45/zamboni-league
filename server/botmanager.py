@@ -40,6 +40,7 @@ def start() -> dict:
         # Bot lives in roster-app/bot/; run from roster-app/
         cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         env = os.environ.copy()
+        env.setdefault('BOT_ENV', 'dev')
         # Pass bot secret through so it's available to the subprocess
         _log_lines.clear()
         _log_lines.append(f'[{datetime.now(timezone.utc).strftime("%H:%M:%S")}] Starting bot…')

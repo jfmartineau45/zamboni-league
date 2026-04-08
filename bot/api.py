@@ -84,6 +84,21 @@ async def get_discord_config() -> dict:
     return state.get('discordConfig') or {}
 
 
+async def get_bot_events(limit: int = 20) -> list[dict]:
+    status, data = await api_get(f'/api/bot/events?limit={limit}')
+    if status == 200 and isinstance(data, dict):
+        return data.get('events', [])
+    return []
+
+
+async def ack_bot_events(ids: list[int], handled_by: str = 'discord-bot') -> dict:
+    payload = {'ids': ids, 'handledBy': handled_by}
+    status, body = await api_post('/api/bot/events/ack', payload)
+    if status == 200:
+        return body
+    raise RuntimeError(body.get('error', 'Failed to ack bot events'))
+
+
 async def get_zamboni_player(gamertag: str) -> dict:
     """Fetch a manager's Zamboni profile + full game history via the server proxy.
     Returns { profile, history: { vs: [...], so: [...] }, version } or {}."""
