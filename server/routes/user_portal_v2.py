@@ -387,7 +387,7 @@ def discord_oauth_start():
     if not _oauth_ready():
         return jsonify({'error': 'Discord OAuth is not configured'}), 503
     state_token = secrets.token_urlsafe(24)
-    next_path = request.args.get('next', '/?portal=1')
+    next_path = request.args.get('next', '/league')
     session['discord_oauth_state'] = state_token
     session['discord_oauth_next'] = next_path
     cfg = _oauth_config()
@@ -408,19 +408,19 @@ def discord_oauth_callback():
     state_token = request.args.get('state', '')
     code = request.args.get('code', '')
     if not expected_state or state_token != expected_state or not code:
-        return redirect('/?portal=1&portalError=oauth')
+        return redirect('/league?portalError=oauth')
     try:
         token_data = _exchange_code(code)
         access_token = token_data.get('access_token', '')
         if not access_token:
-            return redirect('/?portal=1&portalError=token')
+            return redirect('/league?portalError=token')
         discord_user = _fetch_discord_user(access_token)
         session['discord_user'] = discord_user
         session.pop('discord_oauth_state', None)
-        next_path = session.pop('discord_oauth_next', '/?portal=1')
+        next_path = session.pop('discord_oauth_next', '/league')
     except (URLError, HTTPError, Exception):
-        return redirect('/?portal=1&portalError=fetch')
-    return redirect(next_path or '/?portal=1')
+        return redirect('/league?portalError=fetch')
+    return redirect(next_path or '/league')
 
 
 @user_portal_v2_bp.route('/api/v2/user/session', methods=['GET'])
