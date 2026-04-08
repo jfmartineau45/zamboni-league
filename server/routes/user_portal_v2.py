@@ -690,9 +690,8 @@ def admin_list_submissions():
 @user_portal_v2_bp.route('/api/v2/me/roster', methods=['GET'])
 def get_my_roster():
     """Get current manager's roster for trade proposals"""
-    user = _current_user()
-    ok, err = _check_user_linked(user)
-    if not ok:
+    user, err = _require_user()
+    if err:
         return err
     
     link = _get_user_link(user['id'])
@@ -736,9 +735,8 @@ def get_my_roster():
 @user_portal_v2_bp.route('/api/v2/me/propose-trade', methods=['POST'])
 def propose_trade():
     """Manager proposes a trade for admin approval"""
-    user = _current_user()
-    ok, err = _check_user_linked(user)
-    if not ok:
+    user, err = _require_user()
+    if err:
         return err
     
     link = _get_user_link(user['id'])
