@@ -465,7 +465,7 @@ function portalGameSummary(g) {
   return `${g.homeTeam} vs ${g.awayTeam}`;
 }
 
-async function startPortalLogin(next = '/?portal=1') {
+async function startPortalLogin(next = '/league') {
   window.location.href = `/api/v2/oauth/discord/start?next=${encodeURIComponent(next)}`;
 }
 
