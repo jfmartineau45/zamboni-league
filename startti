@@ -1,2 +1,0 @@
-. myenv/bin/activate
-NHL_BOT_SECRET="SECRET" python run.py

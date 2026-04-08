@@ -27,6 +27,8 @@ elif _bot_env:
         from dotenv import load_dotenv
         load_dotenv(_fallback)
 
+BOT_ENV = _bot_env or 'prod'
+
 
 def _int(key: str, default: int = 0) -> int:
     v = os.environ.get(key, '')

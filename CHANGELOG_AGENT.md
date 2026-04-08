@@ -846,6 +846,55 @@ The agreed implementation target is:
   - Phase 2: once `zamboniStats` is stored on game objects (via Discord `/score` Zamboni picker), add Shots, Hits, TOA, FO%, PP% columns to this same table for even richer power-ranking data
   - Zamboni columns slot in naturally since the table is already sortable
 
+### 2026-04-07 — Website-first player portal and robust multi-user backend
+
+- **Files changed**
+  - `roster-app/server/routes/user_portal.py`
+  - `roster-app/server/routes/user_portal_v2.py` (new)
+  - `roster-app/server/server.py`
+  - `roster-app/server/schema_migrations.sql` (new)
+  - `roster-app/server/migrate_db.py` (new)
+  - `roster-app/app.js`
+  - `roster-app/index.html`
+  - `roster-app/styles.css`
+  - `roster-app/upgrades/website-robustness-roadmap.md` (new)
+  - `roster-app/upgrades/bot-posting-refactor-roadmap.md` (new)
+  - `roster-app/README.md`
+  - `roster-app/CHANGELOG_AGENT.md`
+
+- **What changed**
+  - Added website-native Discord OAuth player portal flow for sign-in, manager linking, RPCN / Zamboni tag capture, and mobile-friendly score submission
+  - Added Zamboni-assisted score matching with manual fallback, plus client-side prefetch/cache for recent eligible games to speed up submission UX
+  - Fixed website score flow issues around case-sensitive Zamboni lookup, incorrect OT display, and box score `0-0` rendering caused by incomplete stored `zamboniStats`
+  - Improved portal UI with team logo, current record, eligible game counts, current week, and better linked-user presentation
+  - Introduced dedicated database tables for user-facing workflows:
+    - `user_links` for Discord account ↔ manager link records
+    - `score_submissions` for atomic score submission records and audit trail
+    - `trade_offers` placeholder table for future website trade workflow
+  - Added `server/migrate_db.py` and `server/schema_migrations.sql` to create the new tables and seed existing linked users from manager records
+  - Added `server/routes/user_portal_v2.py` and switched the server to use it as the active website portal backend
+  - Updated frontend portal calls to use `/api/v2/*` endpoints
+  - Added conflict protection so concurrent score submissions check that a game is still unplayed at submit time and fail safely if another user already scored it
+  - Added score submission audit metadata and atomic insert-first workflow before applying approved results to league state
+  - Documented a product-direction shift: the website is now the primary surface for player workflows, while the Discord bot is being repositioned toward posting links, scores, trades, reminders, and notifications instead of hosting full interactive flows
+  - Added roadmap docs in `upgrades/` for website robustness and bot-posting refactor planning
+
+- **Why**
+  - Player-facing workflows had become too large and too valuable to keep split between Discord and the website
+  - The website now provides a faster, more focused, and more mobile-friendly experience for sign-in, linking, and score submission
+  - Relying only on broad `league_state` rewrites was too risky for multiple concurrent nightly users; dedicated tables and atomic submission records make the system safer and easier to evolve
+  - The Discord bot is more valuable as a posting/notification layer than as the main place users complete workflows
+
+- **Deployment / operational notes**
+  - Website OAuth callback path now uses `/api/v2/oauth/discord/callback`
+  - Run `server/migrate_db.py` before relying on the new robust portal tables in a fresh or upgraded environment
+  - Existing manager records are still updated for backward compatibility during the transition away from old Discord-first flows
+
+- **Known follow-up**
+  - Build admin repair UI for viewing/fixing `user_links` and `score_submissions`
+  - Refactor Discord bot `/signup` and `/score` into website-link commands and posting hooks
+  - Continue moving player-facing mutable workflows away from broad league-state writes where appropriate
+
 ## Update Rule For Future Sessions
 
 For every meaningful session, add a short dated entry with:

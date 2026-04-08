@@ -9,6 +9,7 @@ Run:
 """
 import os
 import sys
+import secrets
 
 # Allow imports like "from server.db import ..."
 # when running from the roster-app/ directory
@@ -23,7 +24,13 @@ from server.routes.sysdata import sysdata_bp
 from server.routes.pending import pending_bp
 from server.routes.games import games_bp
 from server.routes.zamboni import zamboni_bp
+from server.routes.bot_events import bot_events_bp
+from server.routes.user_portal_v2 import user_portal_v2_bp
 from server import botmanager
+
+# Kill any orphaned bot processes left over from a previous server instance
+import subprocess as _sp
+_sp.run(['pkill', '-f', 'python -m bot.bot'], capture_output=True)
 
 # ── App setup ────────────────────────────────────────────────────────────────
 STATIC_DIR = os.path.dirname(os.path.dirname(__file__))   # roster-app/
@@ -32,6 +39,7 @@ ALLOWED_CORS_ORIGINS = {
 }
 
 app = Flask(__name__, static_folder=None)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', '') or os.environ.get('NHL_JWT_SECRET', '') or secrets.token_hex(32)
 
 @app.route('/api/ping', methods=['GET', 'POST'])
 def ping():
@@ -91,6 +99,8 @@ app.register_blueprint(sysdata_bp)
 app.register_blueprint(pending_bp)
 app.register_blueprint(games_bp)
 app.register_blueprint(zamboni_bp)
+app.register_blueprint(bot_events_bp)
+app.register_blueprint(user_portal_v2_bp)
 
 
 

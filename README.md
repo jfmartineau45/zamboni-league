@@ -1,21 +1,22 @@
 # Zamboni League — NHL Legacy League Manager
 
-A full-stack fantasy hockey league manager built for NHL Legacy leagues. Manage rosters, track scores, standings, trades, and Discord notifications — all in one place.
+A full-stack fantasy hockey league manager built for NHL Legacy leagues. Manage rosters, track scores, standings, trades, and league updates with a website-first player experience.
 
 **Live Features:**
 - 📊 Real-time standings with GF, GA, DIFF
 - 🎮 Roster management (NHL API players + custom OVR/PLT ratings)
-- 🏒 Score submission and admin approval workflow
+- 🏒 Website-native player portal with Discord OAuth login and score submission
 - 🔄 Trade tracking with player ratings
-- 💬 Discord bot integration with rich embeds
+- 🤖 Discord bot integration for posting links, updates, and notifications
 - 📈 Season snapshots and historical standings
 - ⚡ Fast, lightweight single-page app
+- 🧾 Robust multi-user backend for links and score submissions
 
 ## Stack
 
 - **Frontend** — vanilla JS SPA (`app.js` + `styles.css`), no frameworks
 - **Backend** — Flask + SQLite (`server/`)
-- **Discord Bot** — discord.py with slash commands (`bot/`)
+- **Discord Bot** — discord.py for posting, reminders, and website deep links (`bot/`)
 
 ## Quick Start
 
@@ -38,7 +39,20 @@ NHL_BOT_SECRET="your-secret-here" python run.py
 
 Open `http://localhost:3000` — first visit creates `server/league.db` automatically.
 
-### 3. Set up the Discord bot (optional but recommended)
+### 3. Configure Discord OAuth for the website portal
+
+Set these server environment variables before starting Flask:
+
+```bash
+DISCORD_CLIENT_ID=your_discord_app_id
+DISCORD_CLIENT_SECRET=your_discord_client_secret
+DISCORD_REDIRECT_URI=http://localhost:3000/api/v2/oauth/discord/callback
+FLASK_SECRET_KEY=replace-with-a-stable-secret
+```
+
+This powers the website-native player portal login and account linking flow.
+
+### 4. Set up the Discord bot (optional)
 
 ```bash
 cp bot/.env.example bot/.env
@@ -46,13 +60,13 @@ cp bot/.env.example bot/.env
 
 Edit `bot/.env` with your Discord token and server details (see [Environment Variables](#environment-variables) below).
 
-### 4. Start the bot
+### 5. Start the bot
 
 ```bash
 python -m bot.bot
 ```
 
-Alternatively, use the **🤖 Discord Bot** control panel in the web app's Settings (admin login required) for easy start/stop without needing a terminal.
+The bot is now best used for posting league updates, reminders, and website links rather than hosting the main user workflows.
 
 ## Project Structure
 
@@ -67,11 +81,16 @@ roster-app/
 ├── server/
 │   ├── app.py                    # Flask + routes
 │   ├── db.py                     # SQLite schema
+│   ├── migrate_db.py             # Migration helper for dedicated user-facing tables
+│   ├── schema_migrations.sql     # SQL schema for robust multi-user storage
 │   ├── routes/
 │   │   ├── auth.py               # JWT authentication
 │   │   ├── state.py              # League state GET/POST
 │   │   ├── games.py              # Teams, scores
-│   │   └── pending.py            # Approval queue
+│   │   ├── pending.py            # Approval queue
+│   │   ├── user_portal.py        # Original website portal routes
+│   │   ├── user_portal_v2.py     # Robust website-first portal routes
+│   │   └── zamboni.py            # Zamboni proxy endpoints
 │   └── botmanager.py             # Bot process control
 └── bot/
     ├── bot.py                    # Discord client
@@ -81,7 +100,7 @@ roster-app/
     ├── embeds.py                 # Discord embed builders
     ├── .env.example              # Environment template
     └── commands/
-        ├── score.py              # /score command
+        ├── score.py              # legacy /score command (transitioning away from interactive flow)
         ├── trade.py              # /trade command
         ├── standings.py          # /standings command
         └── pending.py            # /pending command (admin)
@@ -91,11 +110,34 @@ roster-app/
 
 | Command | Who | Purpose |
 |---|---|---|
-| `/score` | Anyone | Submit a game result for this week (requires admin approval) |
+| `/score` | Anyone | Transitional command that should point users to the website portal |
 | `/standings` | Anyone | View top-5 standings preview + link to full site |
 | `/trade` | Admin | Record a trade between two teams |
 | `/pending` | Admin | List and approve/reject pending submissions |
 | `/botlogin` | Admin | Authenticate bot with admin password |
+
+## Website-First Player Portal
+
+The main player workflow now lives on the website.
+
+### Player-facing website features
+
+- Discord OAuth login
+- manager linking with RPCN / Zamboni tag validation
+- mobile-friendly score portal
+- Zamboni-assisted score matching with manual fallback
+- client-side prefetch/cache for recent eligible games
+- team logo, current record, and portal dashboard polish
+
+### Robust backend architecture
+
+The website portal now uses dedicated tables for user-facing actions:
+
+- `user_links` — Discord account to manager link records
+- `score_submissions` — atomic score submissions with audit trail
+- `trade_offers` — future trade workflow storage
+
+This avoids relying entirely on broad `league_state` rewrites for real-time player activity and makes concurrent submissions safer.
 
 ## Environment Variables
 
@@ -105,6 +147,10 @@ roster-app/
 |---|---|---|
 | `NHL_BOT_SECRET` | *(required)* | Shared secret between server and bot (must match bot's `NHL_BOT_SECRET`) |
 | `NHL_JWT_SECRET` | `nhl-legacy-league-secret-change-me` | JWT signing key (change in production!) |
+| `DISCORD_CLIENT_ID` | *(recommended)* | Discord OAuth app client ID for website login |
+| `DISCORD_CLIENT_SECRET` | *(recommended)* | Discord OAuth app client secret for website login |
+| `DISCORD_REDIRECT_URI` | *(recommended)* | OAuth callback URL for website login |
+| `FLASK_SECRET_KEY` | *(recommended)* | Stable Flask session secret for website sessions |
 | `PORT` | `3000` | Server port |
 
 ### Bot (`bot/.env`)
@@ -120,22 +166,31 @@ roster-app/
 | `APP_URL` | ✅ | Public-facing URL (same as `API_BASE` or your domain) |
 | `SCORES_CHANNEL` | ✅ | Discord channel for score posts |
 | `TRADES_CHANNEL` | ✅ | Discord channel for trade posts |
-| `PENDING_CHANNEL` | ✅ | Discord channel for approval requests |
+| `PENDING_CHANNEL` | ✅ | Discord channel for approval/admin messages |
 
 ## Key Features
 
-### Score Submission & Approval
+### Website Score Submission
 
-1. Manager runs `/score` in Discord
-2. Selects game from this week's schedule
-3. Enters home/away scores + OT flag
-4. Score goes to admin for approval
-5. Admin approves → game recorded + result posted to Discord
-6. Website standings update automatically
+1. Player signs into the website with Discord OAuth
+2. Links their manager account and RPCN / Zamboni tag
+3. Opens the mobile-friendly score portal
+4. Selects an eligible league game
+5. Picks a matching Zamboni result or falls back to manual entry
+6. Score submission is stored atomically with audit metadata
+7. Approved result updates league state and website standings
+
+### Multi-user robustness
+
+- dedicated `user_links` and `score_submissions` tables
+- atomic score submission records
+- conflict detection for already-scored games
+- audit trail for who submitted what and when
+- safer foundation for concurrent nightly use
 
 ### Discord Embeds
 
-- **Score Result** — Red embed with team logos, manager names, final score
+- **Score Result** — Discord post for newly approved scores with website-first flow support
 - **Trade Wire** — Green embed with player OVR/PLT ratings
 - **Standings** — Top-5 teaser with link to full site
 - **Pending** — Gold embed for approvals (sent to admins via DM + channel)
@@ -190,9 +245,15 @@ python -m bot.bot
 
 ## Troubleshooting
 
-**"Game not found" on /score**
-- Make sure the game exists in the schedule
-- Current week is calculated as the lowest week with unplayed games
+**Website portal says account is not linked**
+- Sign in through Discord OAuth first
+- Link your manager account in the player portal
+- Make sure your RPCN / Zamboni tag is valid
+
+**Score submission says game was already scored**
+- Another user may have submitted it first
+- Refresh the portal and try another eligible game
+- This is expected conflict protection in the new robust flow
 
 **Bot not sending messages to Discord**
 - Verify `SCORES_CHANNEL`, `TRADES_CHANNEL`, `PENDING_CHANNEL` are set correctly
@@ -214,6 +275,10 @@ python -m bot.bot
 See detailed guides:
 - **[USER_GUIDE.md](USER_GUIDE.md)** — How to submit scores, view standings, manage rosters
 - **[ADMIN_GUIDE.md](ADMIN_GUIDE.md)** — How to set up and manage the league
+
+See roadmap docs in `upgrades/` for:
+- website robustness planning
+- bot posting refactor direction
 
 ## License
 

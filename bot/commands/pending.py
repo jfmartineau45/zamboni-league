@@ -120,61 +120,18 @@ class PendingCog(commands.Cog):
         description='[Admin] List all pending scores and trades'
     )
     async def pending(self, interaction: discord.Interaction):
-        """Show all pending items that need approval."""
-        await interaction.response.defer(ephemeral=True)
-
-        from bot.api import get_state
-        from bot.auth import get_token
-        state = await get_state()
-        token = get_token()
-
-        if not token:
-            await interaction.followup.send(
-                'Bot not authenticated. Restart the bot to auto-authenticate.', ephemeral=True
-            )
-            return
-
-        # Fetch pending items
-        import aiohttp
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f'{config.API_BASE}/api/pending',
-                headers={'Authorization': f'Bearer {token}'}
-            ) as r:
-                if r.status != 200:
-                    await interaction.followup.send('Failed to fetch pending items.', ephemeral=True)
-                    return
-                items = await r.json(content_type=None)
-
-        if not items:
-            await interaction.followup.send('No pending items.', ephemeral=True)
-            return
-
-        # Group by type
-        scores = [i for i in items if i.get('type') == 'score']
-        trades = [i for i in items if i.get('type') == 'trade']
-
-        embed = discord.Embed(
-            title='📋 Pending Items',
-            color=discord.Color.gold()
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(
+            label='Open Website Admin',
+            style=discord.ButtonStyle.link,
+            url=f'{config.APP_URL}/#settings',
+        ))
+        await interaction.response.send_message(
+            '📋 **Pending reviews now belong on the website admin panel.**\n'
+            'Use the site to review pending items and manage league operations.',
+            view=view,
+            ephemeral=True,
         )
-
-        if scores:
-            score_text = '\n'.join([
-                f"• {p['payload']['homeTeam']} {p['payload']['homeScore']} – {p['payload']['awayScore']} {p['payload']['awayTeam']}"
-                for p in scores[:10]
-            ])
-            embed.add_field(name=f'⚽ Scores ({len(scores)})', value=score_text or 'None', inline=False)
-
-        if trades:
-            trade_text = '\n'.join([
-                f"• {p['payload']['fromTeam']} ↔ {p['payload']['toTeam']} ({len(p['payload']['playersSent'])}↔{len(p['payload']['playersReceived'])} players)"
-                for p in trades[:10]
-            ])
-            embed.add_field(name=f'🔄 Trades ({len(trades)})', value=trade_text or 'None', inline=False)
-
-        embed.set_footer(text='Use the approval buttons in DMs/pending channel to process')
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
