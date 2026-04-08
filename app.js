@@ -685,19 +685,16 @@ async function showProposeTrade() {
 }
 
 function openTradeProposalModal(data) {
-  const { myTeam, roster, otherTeams } = data;
-  
-  console.log('Trade data:', data); // Debug
+  const { myTeam, otherTeams } = data;
   
   const teamOptions = otherTeams.map(code => 
     `<option value="${code}">${code}</option>`
   ).join('');
   
-  const myPlayersList = Array.isArray(roster) && roster.length
-    ? roster.map(pid => {
-        const name = PLAYER_DB[pid] || `Player #${pid}`;
-        return `<label class="portal-checkbox-row"><input type="checkbox" class="trade-my-player" value="${pid}"> ${name}</label>`;
-      }).join('')
+  // Get my team's players from state
+  const myPlayers = state.players.filter(p => p.teamCode === myTeam).sort((a,b) => a.name.localeCompare(b.name));
+  const myPlayersList = myPlayers.length
+    ? myPlayers.map(p => `<label class="portal-checkbox-row"><input type="checkbox" class="trade-my-player" data-name="${p.name}"> ${p.name}</label>`).join('')
     : '<div class="text-dim">No players on roster</div>';
   
   showModal('🔄 Propose Trade', `
@@ -729,20 +726,19 @@ function openTradeProposalModal(data) {
   });
   
   // Load partner roster when team selected
-  $('trade-partner-select')?.addEventListener('change', async (e) => {
+  $('trade-partner-select')?.addEventListener('change', (e) => {
     const partnerTeam = e.target.value;
     if (!partnerTeam) {
       $('trade-their-players').innerHTML = '<div class="text-dim">Select a team first</div>';
       return;
     }
     
-    const partnerRoster = state.rosters?.[partnerTeam] || [];
-    const partnerPlayersList = partnerRoster.map(pid => {
-      const name = PLAYER_DB[pid] || `Player #${pid}`;
-      return `<label class="portal-checkbox-row"><input type="checkbox" class="trade-their-player" value="${pid}"> ${name}</label>`;
-    }).join('');
+    const partnerPlayers = state.players.filter(p => p.teamCode === partnerTeam).sort((a,b) => a.name.localeCompare(b.name));
+    const partnerPlayersList = partnerPlayers.length
+      ? partnerPlayers.map(p => `<label class="portal-checkbox-row"><input type="checkbox" class="trade-their-player" data-name="${p.name}"> ${p.name}</label>`).join('')
+      : '<div class="text-dim">No players on roster</div>';
     
-    $('trade-their-players').innerHTML = partnerPlayersList || '<div class="text-dim">No players on roster</div>';
+    $('trade-their-players').innerHTML = partnerPlayersList;
   });
 }
 
@@ -753,8 +749,8 @@ async function submitTradeProposal() {
     return;
   }
   
-  const myPlayers = Array.from(document.querySelectorAll('.trade-my-player:checked')).map(cb => parseInt(cb.value));
-  const theirPlayers = Array.from(document.querySelectorAll('.trade-their-player:checked')).map(cb => parseInt(cb.value));
+  const myPlayers = Array.from(document.querySelectorAll('.trade-my-player:checked')).map(cb => cb.dataset.name);
+  const theirPlayers = Array.from(document.querySelectorAll('.trade-their-player:checked')).map(cb => cb.dataset.name);
   
   if (!myPlayers.length && !theirPlayers.length) {
     toast('Select at least one player', 'error');
