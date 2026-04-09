@@ -25,6 +25,24 @@ _PO_ROUND_LABELS = {
 }
 
 
+def _app_base_path() -> str:
+    raw = (os.environ.get('APP_BASE_PATH', '/') or '/').strip()
+    if not raw.startswith('/'):
+        raw = '/' + raw
+    raw = raw.rstrip('/')
+    return raw or '/'
+
+
+def _app_redirect_path(suffix: str = '') -> str:
+    base = _app_base_path()
+    suffix = suffix or ''
+    if suffix and not suffix.startswith('?') and not suffix.startswith('#') and not suffix.startswith('/'):
+        suffix = '/' + suffix
+    if base == '/':
+        return suffix or '/'
+    return f'{base}{suffix}'
+
+
 def _oauth_config() -> dict:
     return {
         'client_id': os.environ.get('DISCORD_CLIENT_ID', '').strip(),
@@ -38,7 +56,6 @@ def _oauth_ready() -> bool:
     return bool(cfg['client_id'] and cfg['client_secret'] and cfg['redirect_uri'])
 
 
-
 def _json_request(url: str, *, method: str = 'GET', data: dict | None = None, headers: dict | None = None):
     payload = None
     req_headers = {'Accept': 'application/json', 'User-Agent': 'ZamboniLeague/1.0'}
@@ -50,7 +67,6 @@ def _json_request(url: str, *, method: str = 'GET', data: dict | None = None, he
     req = Request(url, data=payload, headers=req_headers, method=method)
     with urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode('utf-8'))
-
 
 
 def _exchange_code(code: str) -> dict:
@@ -68,13 +84,11 @@ def _exchange_code(code: str) -> dict:
     )
 
 
-
 def _fetch_discord_user(access_token: str) -> dict:
     return _json_request(
         f'{_DISCORD_API}/users/@me',
         headers={'Authorization': f'Bearer {access_token}'},
     )
-
 
 
 def _avatar_url(user: dict) -> str:
@@ -83,7 +97,6 @@ def _avatar_url(user: dict) -> str:
     if not avatar or not user_id:
         return ''
     return f'https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png?size=128'
-
 
 
 def _load_state() -> dict:
@@ -96,7 +109,6 @@ def _load_state() -> dict:
         return json.loads(row['data'])
     except Exception:
         return {}
-
 
 
 def _save_state(state: dict):
@@ -113,11 +125,9 @@ def _save_state(state: dict):
     conn.close()
 
 
-
 def _current_user() -> dict | None:
     user = session.get('discord_user')
     return user if isinstance(user, dict) and user.get('id') else None
-
 
 
 def _require_user():
@@ -127,13 +137,11 @@ def _require_user():
     return user, None
 
 
-
 def _find_manager_by_discord(state: dict, discord_id: str) -> dict | None:
     return next(
         (m for m in state.get('managers', []) if str(m.get('discordId', '')) == str(discord_id)),
         None,
     )
-
 
 
 def _get_team_for_manager(state: dict, mgr_id: str) -> str | None:
@@ -143,13 +151,11 @@ def _get_team_for_manager(state: dict, mgr_id: str) -> str | None:
     )
 
 
-
 def _auto_week(state: dict) -> int:
     unplayed = [g for g in state.get('games', []) if not g.get('played')]
     reg_weeks = [g.get('week', 0) for g in unplayed if (g.get('week') or 0) < 100]
     po_weeks = [g.get('week', 0) for g in unplayed if (g.get('week') or 0) >= 100]
     return min(reg_weeks) if reg_weeks else (min(po_weeks) if po_weeks else 1)
-
 
 
 def _current_week(state: dict) -> int:
@@ -158,7 +164,6 @@ def _current_week(state: dict) -> int:
         return int(raw) if raw is not None else _auto_week(state)
     except (TypeError, ValueError):
         return _auto_week(state)
-
 
 
 def _eligible_games_for_manager(state: dict, manager: dict) -> list[dict]:
@@ -282,7 +287,6 @@ def _zamboni_player(gamertag: str) -> dict | None:
     return None
 
 
-
 def _validate_zamboni_tag(tag: str) -> tuple[bool | None, str | None]:
     clean = (tag or '').strip()
     if not clean:
@@ -301,7 +305,6 @@ def _validate_zamboni_tag(tag: str) -> tuple[bool | None, str | None]:
                 if val:
                     known.add(val.lower())
     return clean.lower() in known, None
-
 
 
 def _portal_payload(state: dict, user: dict | None) -> dict:
@@ -323,7 +326,7 @@ def discord_oauth_start():
     if not _oauth_ready():
         return jsonify({'error': 'Discord OAuth is not configured'}), 503
     state_token = secrets.token_urlsafe(24)
-    next_path = request.args.get('next', '/league')
+    next_path = request.args.get('next', _app_base_path())
     session['discord_oauth_state'] = state_token
     session['discord_oauth_next'] = next_path
     cfg = _oauth_config()
@@ -344,7 +347,7 @@ def discord_oauth_callback():
     state_token = request.args.get('state', '')
     code = request.args.get('code', '')
     if not expected_state or state_token != expected_state or not code:
-        return redirect('/league?portalError=oauth')
+        return redirect(_app_redirect_path('?portalError=oauth'))
     try:
         token_data = _exchange_code(code)
         access_token = token_data.get('access_token', '')
@@ -353,16 +356,16 @@ def discord_oauth_callback():
         user = _fetch_discord_user(access_token)
     except Exception:
         session.pop('discord_oauth_state', None)
-        return redirect('/league?portalError=oauth')
+        return redirect(_app_redirect_path('?portalError=oauth'))
     session.pop('discord_oauth_state', None)
-    next_path = session.pop('discord_oauth_next', '/league')
+    next_path = session.pop('discord_oauth_next', _app_base_path())
     session['discord_user'] = {
         'id': str(user.get('id', '')),
         'username': user.get('username', ''),
         'globalName': user.get('global_name', ''),
         'avatar': _avatar_url(user),
     }
-    return redirect(next_path or '/league')
+    return redirect(next_path or _app_base_path())
 
 
 @user_portal_bp.route('/api/user/session', methods=['GET'])

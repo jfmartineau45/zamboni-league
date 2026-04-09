@@ -393,26 +393,6 @@ from server.routes.user_portal import (
 )
 
 
-# ── App base path helpers ─────────────────────────────────────────────────────
-
-def _app_base_path() -> str:
-    raw = (os.environ.get('APP_BASE_PATH', '/') or '/').strip()
-    if not raw.startswith('/'):
-        raw = '/' + raw
-    raw = raw.rstrip('/')
-    return raw or '/'
-
-
-def _app_redirect_path(suffix: str = '') -> str:
-    base = _app_base_path()
-    suffix = suffix or ''
-    if suffix and not suffix.startswith('?') and not suffix.startswith('#') and not suffix.startswith('/'):
-        suffix = '/' + suffix
-    if base == '/':
-        return suffix or '/'
-    return f'{base}{suffix}'
-
-
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @user_portal_v2_bp.route('/api/v2/oauth/discord/start', methods=['GET'])
@@ -420,7 +400,7 @@ def discord_oauth_start():
     if not _oauth_ready():
         return jsonify({'error': 'Discord OAuth is not configured'}), 503
     state_token = secrets.token_urlsafe(24)
-    next_path = request.args.get('next', _app_base_path())
+    next_path = request.args.get('next', '/league')
     session['discord_oauth_state'] = state_token
     session['discord_oauth_next'] = next_path
     cfg = _oauth_config()
@@ -441,19 +421,19 @@ def discord_oauth_callback():
     state_token = request.args.get('state', '')
     code = request.args.get('code', '')
     if not expected_state or state_token != expected_state or not code:
-        return redirect(_app_redirect_path('?portalError=oauth'))
+        return redirect('/league?portalError=oauth')
     try:
         token_data = _exchange_code(code)
         access_token = token_data.get('access_token', '')
         if not access_token:
-            return redirect(_app_redirect_path('?portalError=token'))
+            return redirect('/league?portalError=token')
         discord_user = _fetch_discord_user(access_token)
         session['discord_user'] = discord_user
         session.pop('discord_oauth_state', None)
-        next_path = session.pop('discord_oauth_next', _app_base_path())
+        next_path = session.pop('discord_oauth_next', '/league')
     except (URLError, HTTPError, Exception):
-        return redirect(_app_redirect_path('?portalError=fetch'))
-    return redirect(next_path or _app_base_path())
+        return redirect('/league?portalError=fetch')
+    return redirect(next_path or '/league')
 
 
 @user_portal_v2_bp.route('/api/v2/user/session', methods=['GET'])
@@ -720,180 +700,10 @@ def admin_list_submissions():
     return jsonify({'submissions': submissions})
 
 
-@user_portal_v2_bp.route('/api/v2/me/roster', methods=['GET'])
-def get_my_roster():
-    """Get current manager's roster for trade proposals"""
-    user, err = _require_user()
-    if err:
-        return err
-    
-    link = _get_user_link(user['id'])
-    if not link:
-        return jsonify({'error': 'Account is not linked to a manager'}), 409
-    
-    state = _load_state()
-    my_team = _get_team_for_manager(state, link['manager_id'])
-    if not my_team:
-        return jsonify({'error': 'You are not assigned to a team'}), 404
-    
-    # Get other teams for trade partner selection
-    other_teams = [
-        code for code in state.get('teamOwners', {}).keys()
-        if code != my_team
-    ]
-    
-    # Check trade deadline status
-    trade_deadline = state.get('tradeDeadline')
-    deadline_passed = False
-    if trade_deadline:
-        from datetime import datetime, timezone
-        try:
-            deadline_dt = datetime.fromisoformat(trade_deadline.replace('Z', '+00:00'))
-            deadline_passed = datetime.now(timezone.utc) > deadline_dt
-        except Exception:
-            pass
-    
-    return jsonify({
-        'myTeam': my_team,
-        'otherTeams': other_teams,
-        'tradeDeadline': trade_deadline,
-        'deadlinePassed': deadline_passed,
-    })
-
-
-@user_portal_v2_bp.route('/api/v2/me/trades', methods=['GET'])
-def get_my_trades():
-    """Get current manager's trade proposals (sent and received)"""
-    user, err = _require_user()
-    if err:
-        return err
-    
-    link = _get_user_link(user['id'])
-    if not link:
-        return jsonify({'error': 'Account is not linked to a manager'}), 409
-    
-    state = _load_state()
-    my_team = _get_team_for_manager(state, link['manager_id'])
-    if not my_team:
-        return jsonify({'error': 'You are not assigned to a team'}), 404
-    
-    # Get all trade proposals involving my team
-    conn = get_conn()
-    rows = conn.execute("""
-        SELECT id, type, payload, status, submitted_by, submitted_name, submitted_at, reviewed_at
-        FROM pending_requests
-        WHERE type = 'trade'
-        ORDER BY submitted_at DESC
-    """).fetchall()
-    conn.close()
-    
-    # Filter to trades involving my team
-    my_trades = []
-    for row in rows:
-        payload = json.loads(row['payload'])
-        if payload.get('fromTeam') == my_team or payload.get('toTeam') == my_team:
-            trade = dict(row)
-            trade['payload'] = payload
-            my_trades.append(trade)
-    
-    return jsonify({'trades': my_trades, 'myTeam': my_team})
-
-
-@user_portal_v2_bp.route('/api/v2/me/propose-trade', methods=['POST'])
-def propose_trade():
-    """Manager proposes a trade for admin approval"""
-    user, err = _require_user()
-    if err:
-        return err
-    
-    link = _get_user_link(user['id'])
-    if not link:
-        return jsonify({'error': 'Account is not linked to a manager'}), 409
-    
-    state = _load_state()
-    manager = _find_manager_by_id(state, link['manager_id'])
-    if not manager:
-        return jsonify({'error': 'Linked manager not found'}), 404
-    
-    my_team = _get_team_for_manager(state, link['manager_id'])
-    if not my_team:
-        return jsonify({'error': 'You are not assigned to a team'}), 404
-    
-    body = request.get_json(force=True) or {}
-    other_team = body.get('otherTeam', '').strip()
-    players_sent = body.get('playersSent', [])
-    players_received = body.get('playersReceived', [])
-    notes = body.get('notes', '').strip()
-    
-    if not other_team:
-        return jsonify({'error': 'Other team is required'}), 400
-    
-    if not players_sent and not players_received:
-        return jsonify({'error': 'At least one player must be involved'}), 400
-    
-    # Check trade deadline
-    trade_deadline = state.get('tradeDeadline')
-    if trade_deadline:
-        try:
-            deadline_dt = datetime.fromisoformat(trade_deadline.replace('Z', '+00:00'))
-            if datetime.now(timezone.utc) > deadline_dt:
-                return jsonify({'error': 'Trade deadline has passed'}), 400
-        except Exception:
-            pass
-    
-    # Create trade payload
-    payload = {
-        'fromTeam': my_team,
-        'toTeam': other_team,
-        'playersSent': players_sent,
-        'playersReceived': players_received,
-        'notes': notes,
-    }
-    
-    # Submit to pending queue
-    import uuid
-    req_id = str(uuid.uuid4())
-    submitted_at = datetime.now(timezone.utc).isoformat()
-    
-    conn = get_conn()
-    conn.execute("""
-        INSERT INTO pending_requests (id, type, payload, submitted_by, submitted_name, submitted_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (req_id, 'trade', json.dumps(payload), user['id'], manager.get('name', ''), submitted_at))
-    conn.commit()
-    
-    # Find the other GM's Discord ID to send notification
-    other_manager_id = next((mid for code, mid in state.get('teamOwners', {}).items() if code == other_team), None)
-    other_discord_id = None
-    if other_manager_id:
-        other_link = conn.execute('SELECT discord_id FROM user_links WHERE manager_id = ?', (other_manager_id,)).fetchone()
-        if other_link:
-            other_discord_id = other_link['discord_id']
-    
-    conn.close()
-    
-    # Queue Discord notification to other GM
-    if other_discord_id:
-        from server.routes.bot_events import queue_bot_event
-        queue_bot_event('trade_proposed', {
-            'reqId': req_id,
-            'fromTeam': my_team,
-            'toTeam': other_team,
-            'proposedBy': manager.get('name', ''),
-            'targetDiscordId': other_discord_id,
-            'playersSent': players_sent,
-            'playersReceived': players_received,
-        })
-    
-    return jsonify({'ok': True, 'id': req_id})
-
-
 @user_portal_v2_bp.route('/api/v2/admin/links/sync', methods=['POST'])
 @require_admin
 def admin_sync_link():
-    """Upsert a user_links row from the admin manager panel.
-    Called on every manager Save to keep DB in sync with state JSON.
-    discord_id here is the raw plaintext value from the admin form — it gets hashed before storage."""
+    """Upsert a user_links row from the admin manager panel. Called on every Save."""
     data = request.get_json(silent=True) or {}
     manager_id = (data.get('manager_id') or '').strip()
     discord_id = (data.get('discord_id') or '').strip()
@@ -926,7 +736,7 @@ def admin_sync_link():
 @user_portal_v2_bp.route('/api/v2/admin/links/unlink', methods=['POST'])
 @require_admin
 def admin_unlink_manager():
-    """Remove the user_links row for a given manager_id so the user can re-link cleanly."""
+    """Remove the user_links row for a given manager_id."""
     data = request.get_json(silent=True) or {}
     manager_id = (data.get('manager_id') or '').strip()
     if not manager_id:
@@ -936,25 +746,6 @@ def admin_unlink_manager():
     conn.commit()
     conn.close()
     return jsonify({'ok': True, 'deleted': result.rowcount})
-
-
-@user_portal_v2_bp.route('/api/v2/admin/links/reassign', methods=['POST'])
-@require_admin
-def admin_reassign_link():
-    """Move a user_links row from one manager_id to another (admin panel re-assignment)."""
-    data = request.get_json(silent=True) or {}
-    from_manager = (data.get('from_manager_id') or '').strip()
-    to_manager   = (data.get('to_manager_id')   or '').strip()
-    if not from_manager or not to_manager:
-        return jsonify({'error': 'from_manager_id and to_manager_id required'}), 400
-    conn = get_conn()
-    result = conn.execute(
-        'UPDATE user_links SET manager_id = ? WHERE manager_id = ?',
-        (to_manager, from_manager),
-    )
-    conn.commit()
-    conn.close()
-    return jsonify({'ok': True, 'updated': result.rowcount})
 
 
 @user_portal_v2_bp.route('/api/v2/admin/links', methods=['GET'])

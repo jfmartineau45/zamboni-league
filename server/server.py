@@ -15,7 +15,7 @@ import secrets
 # when running from the roster-app/ directory
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from flask import Flask, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 
 from server.db import init_db
 from server.routes.auth import auth_bp
@@ -37,6 +37,50 @@ STATIC_DIR = os.path.dirname(os.path.dirname(__file__))   # roster-app/
 ALLOWED_CORS_ORIGINS = {
     origin.strip() for origin in os.environ.get('NHL_CORS_ORIGINS', '').split(',') if origin.strip()
 }
+
+
+def _app_base_path() -> str:
+    raw = (os.environ.get('APP_BASE_PATH', '/') or '/').strip()
+    if not raw.startswith('/'):
+        raw = '/' + raw
+    raw = raw.rstrip('/')
+    return raw or '/'
+
+
+def _startup_warnings() -> list[str]:
+    warnings = []
+    flask_secret = os.environ.get('FLASK_SECRET_KEY', '').strip()
+    jwt_secret = os.environ.get('NHL_JWT_SECRET', '').strip()
+    redirect_uri = os.environ.get('DISCORD_REDIRECT_URI', '').strip()
+    client_id = os.environ.get('DISCORD_CLIENT_ID', '').strip()
+    client_secret = os.environ.get('DISCORD_CLIENT_SECRET', '').strip()
+    app_url = os.environ.get('APP_URL', '').strip()
+    app_base_path = _app_base_path()
+
+    if not flask_secret:
+        warnings.append('FLASK_SECRET_KEY is not set; sessions will not remain stable across restarts.')
+    if jwt_secret and jwt_secret == 'nhl-legacy-league-secret-change-me':
+        warnings.append('NHL_JWT_SECRET is still using the default value.')
+    if any([client_id, client_secret, redirect_uri]) and not all([client_id, client_secret, redirect_uri]):
+        warnings.append('Discord OAuth config is partially set; DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, and DISCORD_REDIRECT_URI should be provided together.')
+    if redirect_uri and '/api/v2/oauth/discord/callback' not in redirect_uri:
+        warnings.append('DISCORD_REDIRECT_URI does not point at the v2 portal callback path.')
+    if app_url and 'localhost' in app_url and os.environ.get('BOT_ENV', '').strip() != 'dev':
+        warnings.append('APP_URL points at localhost; verify this is intentional for the current environment.')
+    if app_base_path != '/' and not redirect_uri:
+        warnings.append('APP_BASE_PATH is set but DISCORD_REDIRECT_URI is missing; verify OAuth redirects before deployment.')
+
+    return warnings
+
+
+def log_startup_config(port: int):
+    host = os.environ.get('APP_URL', '').strip() or f'http://localhost:{port}'
+    print(f"[server] NHL Legacy League API running on http://localhost:{port}")
+    print(f"[server] Public app URL: {host}")
+    print(f"[server] App base path: {_app_base_path()}")
+    print(f"[server] Static files from: {STATIC_DIR}")
+    for warning in _startup_warnings():
+        print(f"[server][warning] {warning}", file=sys.stderr)
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', '') or os.environ.get('NHL_JWT_SECRET', '') or secrets.token_hex(32)
@@ -108,6 +152,8 @@ app.register_blueprint(user_portal_v2_bp)
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_static(path):
+    if path.startswith('api/'):
+        return jsonify({'error': 'API route not found', 'path': f'/{path}'}), 404
     if path and os.path.exists(os.path.join(STATIC_DIR, path)):
         return send_from_directory(STATIC_DIR, path)
     return send_from_directory(STATIC_DIR, 'index.html')
@@ -117,6 +163,5 @@ def serve_static(path):
 if __name__ == '__main__':
     init_db()
     port = int(os.environ.get('PORT', 3001))
-    print(f"[server] NHL Legacy League API running on http://localhost:{port}")
-    print(f"[server] Static files from: {STATIC_DIR}")
+    log_startup_config(port)
     app.run(host='0.0.0.0', port=port, debug=False)

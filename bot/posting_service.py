@@ -62,6 +62,12 @@ class PostingService:
             return await self._handle_score_event(payload)
         if event_type == 'trade_final':
             return await self._handle_trade_event(payload)
+        if event_type == 'trade_proposed':
+            return await self._handle_trade_proposed(payload)
+        if event_type == 'trade_approved':
+            return await self._handle_trade_approved(payload)
+        if event_type == 'trade_rejected':
+            return await self._handle_trade_rejected(payload)
 
         log.info('Unhandled bot event type: %s', event_type)
         return False
@@ -127,4 +133,107 @@ class PostingService:
             return True
         except Exception as exc:
             log.warning('Failed to post trade event: %s', exc, exc_info=True)
+            return False
+
+    async def _handle_trade_proposed(self, payload: Dict[str, Any]) -> bool:
+        """Send DM to other GM when trade is proposed"""
+        target_discord_id = payload.get('targetDiscordId')
+        if not target_discord_id:
+            log.warning('Trade proposed event missing targetDiscordId')
+            return False
+        
+        try:
+            user = await self.bot.fetch_user(int(target_discord_id))
+            if not user:
+                log.warning('Could not find Discord user: %s', target_discord_id)
+                return False
+            
+            from_team = payload.get('fromTeam', '?')
+            to_team = payload.get('toTeam', '?')
+            proposed_by = payload.get('proposedBy', 'Someone')
+            players_sent = payload.get('playersSent', [])
+            players_received = payload.get('playersReceived', [])
+            
+            sent_str = ', '.join(players_sent) if players_sent else '—'
+            recv_str = ', '.join(players_received) if players_received else '—'
+            
+            message = f"""🔄 **Trade Proposal**
+
+{proposed_by} ({from_team}) wants to trade with you ({to_team})!
+
+**{from_team} sends:** {sent_str}
+**{to_team} sends:** {recv_str}
+
+This trade is pending admin review. You'll be notified when it's approved or rejected."""
+            
+            await user.send(message)
+            log.info('Trade proposal DM sent to user %s', target_discord_id)
+            return True
+            
+        except Exception as exc:
+            log.warning('Failed to send trade proposal DM: %s', exc)
+            return False
+
+    async def _handle_trade_approved(self, payload: Dict[str, Any]) -> bool:
+        """Send DM when trade is approved"""
+        target_discord_id = payload.get('targetDiscordId')
+        if not target_discord_id:
+            return False
+        
+        try:
+            user = await self.bot.fetch_user(int(target_discord_id))
+            if not user:
+                return False
+            
+            from_team = payload.get('fromTeam', '?')
+            to_team = payload.get('toTeam', '?')
+            players_sent = payload.get('playersSent', [])
+            players_received = payload.get('playersReceived', [])
+            
+            sent_str = ', '.join(players_sent) if players_sent else '—'
+            recv_str = ', '.join(players_received) if players_received else '—'
+            
+            message = f"""✅ **Trade Approved!**
+
+The trade between {from_team} and {to_team} has been approved!
+
+**{from_team} sends:** {sent_str}
+**{to_team} sends:** {recv_str}
+
+Rosters have been updated. Check the trade hub for details!"""
+            
+            await user.send(message)
+            log.info('Trade approved DM sent to user %s', target_discord_id)
+            return True
+            
+        except Exception as exc:
+            log.warning('Failed to send trade approved DM: %s', exc)
+            return False
+
+    async def _handle_trade_rejected(self, payload: Dict[str, Any]) -> bool:
+        """Send DM when trade is rejected"""
+        target_discord_id = payload.get('targetDiscordId')
+        if not target_discord_id:
+            return False
+        
+        try:
+            user = await self.bot.fetch_user(int(target_discord_id))
+            if not user:
+                return False
+            
+            from_team = payload.get('fromTeam', '?')
+            to_team = payload.get('toTeam', '?')
+            
+            message = f"""❌ **Trade Rejected**
+
+The trade proposal between {from_team} and {to_team} was not approved by the admin.
+
+You can propose a different trade anytime through the Player Portal."""
+            
+            await user.send(message)
+            log.info('Trade rejected DM sent to user %s', target_discord_id)
+            return True
+            
+        except Exception as exc:
+            log.warning('Failed to send trade rejected DM: %s', exc)
             return False

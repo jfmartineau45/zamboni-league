@@ -151,7 +151,17 @@ This avoids relying entirely on broad `league_state` rewrites for real-time play
 | `DISCORD_CLIENT_SECRET` | *(recommended)* | Discord OAuth app client secret for website login |
 | `DISCORD_REDIRECT_URI` | *(recommended)* | OAuth callback URL for website login |
 | `FLASK_SECRET_KEY` | *(recommended)* | Stable Flask session secret for website sessions |
+| `APP_BASE_PATH` | `/` | Base path for website redirects (`/` locally, `/league` if deployed under a subpath) |
+| `APP_URL` | *(optional but recommended)* | Public-facing website URL used for startup visibility and bot deep-link coordination |
 | `PORT` | `3000` | Server port |
+
+### Production notes
+
+- Set a stable `FLASK_SECRET_KEY` before production so website sessions survive restarts.
+- If the website is deployed under a subpath, set `APP_BASE_PATH` to match it exactly.
+- `DISCORD_REDIRECT_URI` should point to the v2 portal callback path:
+  - `/api/v2/oauth/discord/callback`
+- `APP_URL` should be the public website URL, not localhost, in production.
 
 ### Bot (`bot/.env`)
 

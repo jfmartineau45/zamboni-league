@@ -7,6 +7,71 @@
 'use strict';
 
 // ================================================================
+// 1.  PLAYER DATABASE  (from assets/2016/head.txt)
+// ================================================================
+const PLAYER_DB = {
+  20:"Nik Antropov",1373:"David Backes",1431:"Nicklas Backstrom",7607:"Sven Baertschi",
+  51:"Francois Beauchemin",373:"Jamie Benn",9870:"Sam Bennett",67:"Patrice Bergeron",
+  4445:"Patrik Berglund",2076:"Jonathan Bernier",71:"Todd Bertuzzi",1152:"Kevin Bieksa",
+  5754:"Eric Blum",7507:"Sergei Bobrovsky",4440:"Mikkel Boedker",102:"Jay Bouwmeester",
+  104:"Dan Boyle",481:"Tyler Bozak",2279:"Derick Brassard",112:"Eric Brewer",
+  113:"Daniel Briere",123:"Dustin Brown",5677:"Damien Brunner",127:"Ilya Bryzgalov",
+  133:"Brent Burns",1157:"Alexandre Burrows",1215:"Dustin Byfuglien",5498:"Andrei Bykov",
+  1360:"Ryan Callahan",142:"Mike Cammalleri",143:"Brian Campbell",1414:"Daniel Carcillo",
+  1089:"Jeff Carter",151:"Zdeno Chara",2090:"Andrew Cogliano",8779:"Cory Conacher",
+  6058:"Brett Connolly",483:"Logan Couture",6840:"Sean Couturier",1082:"Sidney Crosby",
+  201:"Pavel Datsyuk",220:"Shane Doan",4452:"Drew Doughty",9753:"Leon Draisaitl",
+  2024:"Brandon Dubinsky",371:"Matt Duchene",7633:"Matt Dumba",1151:"Ben Eager",
+  6107:"Jordan Eberle",1342:"Alexander Edler",241:"Christian Ehrhoff",8976:"Aaron Ekblad",
+  243:"Patrik Elias",246:"Ray Emery",3238:"Toby Enstrom",248:"Martin Erat",
+  3242:"Loui Eriksson",9026:"Radek Faksa",1223:"Valtteri Filppula",275:"Marc-Andre Fleury",
+  6738:"Cam Fowler",1124:"Johan Franzen",289:"Marian Gaborik",290:"Simon Gagne",
+  2091:"Sam Gagner",7832:"Alex Galchenyuk",6248:"Brendan Gallagher",8737:"Jake Gardiner",
+  298:"Martin Gerber",1092:"Ryan Getzlaf",302:"Brian Gionta",1226:"Mark Giordano",
+  1400:"Dan Girardi",5296:"Claude Giroux",308:"Scott Gomez",309:"Sergei Gonchar",
+  6932:"Brandon Gormley",2201:"Michael Grabner",1305:"Mike Green",7198:"Wayne Gretzky",
+  9207:"Mikhail Grigorenko",6721:"Taylor Hall",335:"Dan Hamhuis",338:"Michal Handzus",
+  340:"Scott Hannan",344:"Scott Hartnell",349:"Martin Havlat",353:"Dany Heatley",
+  2553:"Victor Hedman",363:"Ales Hemsky",1473:"Niklas Hjalmarsson",6325:"Cody Hodgson",
+  8113:"Josh Holden",380:"Shawn Horcoff",382:"Nathan Horton",384:"Marian Hossa",
+  7076:"Jonathan Huberdeau",386:"Jiri Hudler",387:"Cristobal Huet",398:"Jarome Iginla",
+  401:"Barret Jackman",404:"Jaromir Jagr",6018:"Ryan Johansen",418:"Olli Jokinen",
+  9746:"Seth Jones",5737:"Roman Josi",425:"Tomas Kaberle",6444:"Nazem Kadri",
+  364:"Evander Kane",2086:"Patrick Kane",89:"Erik Karlsson",6725:"Zack Kassian",
+  1116:"Duncan Keith",439:"Ryan Kesler",1309:"Phil Kessel",452:"Chuck Kobasew",
+  1136:"Mikko Koivu",3624:"Anze Kopitar",467:"Ilya Kovalchuk",1398:"David Krejci",
+  476:"Niklas Kronwall",484:"Eddie Lack",1158:"Andrew Ladd",6422:"Gabriel Landeskog",
+  513:"Vincent Lecavalier",522:"David Legwand",524:"Kari Lehtonen",8322:"Mario Lemieux",
+  1298:"Kris Letang",533:"Andreas Lilja",2098:"Bryan Little",2099:"Milan Lucic",
+  1190:"Henrik Lundqvist",547:"Roberto Luongo",549:"Joffrey Lupul",9179:"Nathan MacKinnon",
+  564:"Manny Malhotra",1325:"Evgeni Malkin",5309:"Brad Marchand",577:"Patrick Marleau",
+  646:"Matt Martin",9857:"Connor McDavid",8398:"Ryan McDonagh",618:"Milan Michalek",
+  623:"Ryan Miller",7797:"Sean Monahan",645:"Brenden Morrow",1977:"Matt Moulson",
+  5815:"Ryan Murray",663:"Rick Nash",2168:"James Neal",6019:"Nino Niederreiter",
+  6083:"Ryan Nugent-Hopkins",9268:"Gustav Nyquist",695:"Mattias Ohlund",2494:"Kyle Okposo",
+  376:"Ryan O'Reilly",4444:"T.J. Oshie",1083:"Alexander Ovechkin",5355:"Max Pacioretty",
+  1407:"Pierre-Alexandre Parenteau",1098:"Zach Parise",1353:"Joe Pavelski",1100:"Corey Perry",
+  1086:"Dion Phaneuf",731:"Chris Phillips",4446:"Alex Pietrangelo",743:"Tomas Plekanec",
+  750:"Alexei Ponikarovsky",2077:"Carey Price",759:"Chris Pronger",2305:"Jonathan Quick",
+  1327:"Alexander Radulov",2244:"Tuukka Rask",8849:"Sam Reinhart",788:"Mike Ribeiro",
+  790:"Brad Richards",1102:"Mike Richards",1199:"Pekka Rinne",812:"Derek Roy",
+  2682:"Patrick Roy",818:"Tuomo Ruutu",2078:"Bobby Ryan",820:"Michael Ryder",
+  827:"Bryce Salvador",842:"Marc Savard",4447:"Luke Schenn",1103:"Brent Seabrook",
+  857:"Daniel Sedin",858:"Henrik Sedin",6605:"Tyler Seguin",1304:"Alexander Semin",
+  2089:"Devin Setoguchi",7201:"Ryan Sewell",867:"Patrick Sharp",8443:"Kevin Shattenkirk",
+  4451:"Wayne Simmonds",6419:"Jeff Skinner",904:"Jason Spezza",5507:"Julien Sprunger",
+  908:"Eric Staal",1297:"Jordan Staal",2084:"Marc Staal",4430:"Steven Stamkos",
+  1292:"Paul Stastny",1107:"Alexander Steen",2176:"Chris Stewart",1396:"Zack Stortini",
+  1203:"Mark Streit",983:"P.K. Subban",5536:"Reto Suri",1104:"Ryan Suter",
+  5904:"John Tavares",963:"Joe Thornton",2087:"Jonathan Toews",973:"Raffi Torres",
+  2652:"Kyle Turris",1139:"R.J. Umberger",389:"James Van Riemsdyk",1084:"Thomas Vanek",
+  1005:"Antoine Vermette",1985:"Kris Versteeg",1299:"Marc-Edouard Vlasic",4435:"Jakub Voracek",
+  1015:"David Vyborny",1187:"Cam Ward",1176:"Shea Weber",1034:"Stephen Weiss",
+  5713:"Marc Wieser",1045:"Jason Williams",1046:"Justin Williams",7836:"Nail Yakupov",
+  1315:"Keith Yandle",1070:"Henrik Zetterberg",8488:"Mika Zibanejad",1080:"Dainius Zubrus",
+};
+
+// ================================================================
 // 2.  NHL TEAMS  (IDs match NHLView NG / SYS-DATA team records)
 const NHL_TEAMS = [
   {id:0,  code:"ANA", name:"Anaheim Ducks"},
@@ -148,20 +213,15 @@ let state = defaultState();
 let isAdmin = false;
 let currentSection = 'dashboard';
 let _adminToken = sessionStorage.getItem('nhl-admin-token') || '';
-let _portalSession = defaultPortalSession();
+let _portalSession = { user: null, linked: false, manager: null, teamCode: null, currentWeek: null };
 let _portalGames = [];
 let _portalLinkOptions = [];
 let _portalBusy = false;
 let _portalMatchCache = {};
-let _portalMatchInflight = {};
-let _portalTradesBadgeAt = 0;
-let _portalTradesCache = null;
-let _portalTradesInflight = null;
 let _apiAvailable = false;    // true once we've successfully talked to /api/state
 let _zamboniPlayers = null;   // cached gamertag list from /api/zamboni/players
 let _zbCache     = null;      // cached { tagMap, gameMap, mgrRecord } for box scores
 let _zbCacheAt   = 0;
-let _tradeValuesLoaded = false;
 const _ZB_TTL        = 30 * 60 * 1000; // 30-min in-memory cache
 const _ZB_SS_KEY     = 'nhl_zb_cache';  // sessionStorage key
 const _PORTAL_MATCH_CACHE_KEY = 'nhl_portal_match_cache';
@@ -181,14 +241,6 @@ function normalizeSysDataFile(file) {
   return normalized;
 }
 
-function resolvePlayerName(playerRef, fallbackPrefix = '#') {
-  if (typeof playerRef === 'string') return playerRef;
-  const ref = String(playerRef ?? '').trim();
-  if (!ref) return `${fallbackPrefix}?`;
-  const match = state.players.find(p => String(p.id) === ref);
-  return match?.name || `${fallbackPrefix}${ref}`;
-}
-
 // ── API helpers ───────────────────────────────────────────────────────────────
 async function _apiFetch(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
@@ -200,8 +252,137 @@ async function _portalFetch(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
   const hasBody = opts.body !== undefined && opts.body !== null;
   if (hasBody && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-  if (!headers['Accept']) headers['Accept'] = 'application/json';
-  return fetch(path, { ...opts, headers, cache: 'no-store' });
+  return fetch(path, { ...opts, headers });
+}
+
+function loadPortalMatchCache() {
+  try {
+    const raw = sessionStorage.getItem(_PORTAL_MATCH_CACHE_KEY);
+    if (!raw) {
+      _portalMatchCache = {};
+      return _portalMatchCache;
+    }
+    const parsed = JSON.parse(raw);
+    const now = Date.now();
+    _portalMatchCache = Object.fromEntries(
+      Object.entries(parsed || {}).filter(([, value]) => value?.at && now - value.at < _PORTAL_MATCH_CACHE_TTL)
+    );
+    return _portalMatchCache;
+  } catch {
+    _portalMatchCache = {};
+    return _portalMatchCache;
+  }
+}
+
+function savePortalMatchCache() {
+  try {
+    sessionStorage.setItem(_PORTAL_MATCH_CACHE_KEY, JSON.stringify(_portalMatchCache));
+  } catch {}
+}
+
+function getCachedPortalMatches(gameId) {
+  const entry = _portalMatchCache[String(gameId)];
+  if (!entry) return null;
+  if (Date.now() - entry.at >= _PORTAL_MATCH_CACHE_TTL) {
+    delete _portalMatchCache[String(gameId)];
+    savePortalMatchCache();
+    return null;
+  }
+  return entry.data || null;
+}
+
+function setCachedPortalMatches(gameId, data) {
+  _portalMatchCache[String(gameId)] = { at: Date.now(), data };
+  savePortalMatchCache();
+}
+
+async function loadPortalSession() {
+  try {
+    const r = await _portalFetch('/api/v2/user/session');
+    if (!r.ok) {
+      _portalSession = { user: null, linked: false, manager: null, teamCode: null, currentWeek: null };
+      _portalGames = [];
+      _portalLinkOptions = [];
+      return _portalSession;
+    }
+    _portalSession = await r.json();
+    if (_portalSession?.linked) await loadPortalGames();
+    else _portalGames = [];
+    return _portalSession;
+  } catch {
+    _portalSession = { user: null, linked: false, manager: null, teamCode: null, currentWeek: null };
+    _portalGames = [];
+    _portalLinkOptions = [];
+    return _portalSession;
+  }
+}
+
+async function loadZamboniPlayers() {
+  if (Array.isArray(_zamboniPlayers) && _zamboniPlayers.length) return _zamboniPlayers;
+  try {
+    const r = await _portalFetch('/api/zamboni/players');
+    const body = await r.json().catch(() => ([]));
+    if (!r.ok || !Array.isArray(body)) {
+      _zamboniPlayers = [];
+      return _zamboniPlayers;
+    }
+    _zamboniPlayers = body
+      .map(item => typeof item === 'string' ? item : (item?.gamertag || item?.name || ''))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+    return _zamboniPlayers;
+  } catch {
+    _zamboniPlayers = [];
+    return _zamboniPlayers;
+  }
+}
+
+function rpcnAutocompleteMatches(query) {
+  const q = (query || '').trim().toLowerCase();
+  if (!q || !_zamboniPlayers?.length) return [];
+  const starts = [];
+  const contains = [];
+  for (const tag of _zamboniPlayers) {
+    const lower = tag.toLowerCase();
+    if (lower.startsWith(q)) starts.push(tag);
+    else if (lower.includes(q)) contains.push(tag);
+    if (starts.length + contains.length >= 8) break;
+  }
+  return [...starts, ...contains].slice(0, 8);
+}
+
+function renderRpcnAutocomplete(query) {
+  const drop = $('portal-rpcn-drop');
+  const status = $('portal-rpcn-status');
+  if (!drop) return;
+  const matches = rpcnAutocompleteMatches(query);
+  const clean = (query || '').trim();
+  if (!clean) {
+    drop.classList.remove('open');
+    drop.innerHTML = '';
+    if (status) status.textContent = 'Start typing your RPCN account for suggestions.';
+    return;
+  }
+  if (!matches.length) {
+    drop.classList.remove('open');
+    drop.innerHTML = '';
+    if (status) status.textContent = _zamboniPlayers?.length ? 'No matching RPCN account found yet.' : 'RPCN suggestions unavailable right now.';
+    return;
+  }
+  drop.innerHTML = matches.map(tag => `<button type="button" class="zamboni-option" data-tag="${tag.replace(/"/g, '&quot;')}">${tag}</button>`).join('');
+  drop.classList.add('open');
+  if (status) status.textContent = `${matches.length} suggestion${matches.length === 1 ? '' : 's'} found.`;
+  drop.querySelectorAll('.zamboni-option').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const input = $('portal-zamboni-tag');
+      if (!input) return;
+      input.value = btn.dataset.tag || '';
+      drop.classList.remove('open');
+      drop.innerHTML = '';
+      if (status) status.textContent = `Selected RPCN account: ${input.value}`;
+      input.focus();
+    });
+  });
 }
 
 async function loadPortalGames() {
@@ -233,26 +414,15 @@ async function fetchPortalMatches(gameId, { preferCache = true } = {}) {
     const cached = getCachedPortalMatches(gameId);
     if (cached) return cached;
   }
-  const inflight = getInflightPortalMatches(gameId);
-  if (inflight) return inflight;
-  const request = (async () => {
-    const r = await _portalFetch(`/api/v2/me/score/matches/${encodeURIComponent(gameId)}`);
-    const body = await r.json().catch(() => ({}));
-    const result = { ...body, _ok: r.ok, _status: r.status };
-    if (r.ok) setCachedPortalMatches(gameId, body);
-    return result;
-  })();
-  setInflightPortalMatches(gameId, request);
-  try {
-    return await request;
-  } finally {
-    clearInflightPortalMatches(gameId);
-  }
+  const r = await _portalFetch(`/api/v2/me/score/matches/${encodeURIComponent(gameId)}`);
+  const body = await r.json().catch(() => ({}));
+  if (r.ok) setCachedPortalMatches(gameId, body);
+  return { ...body, _ok: r.ok, _status: r.status };
 }
 
 function prefetchPortalMatches(games = []) {
   if (!_portalSession?.linked || !Array.isArray(games) || !games.length) return;
-  const targets = games.slice(0, 2).filter(g => !getCachedPortalMatches(g.id));
+  const targets = games.slice(0, 5).filter(g => !getCachedPortalMatches(g.id));
   targets.forEach(g => {
     fetchPortalMatches(g.id, { preferCache: true }).catch(() => null);
   });
@@ -295,7 +465,7 @@ function portalGameSummary(g) {
   return `${g.homeTeam} vs ${g.awayTeam}`;
 }
 
-async function startPortalLogin(next = window.location.pathname || '/') {
+async function startPortalLogin(next = '/league') {
   window.location.href = `/api/v2/oauth/discord/start?next=${encodeURIComponent(next)}`;
 }
 
@@ -303,7 +473,11 @@ async function handlePortalLogout() {
   try {
     await _portalFetch('/api/v2/user/logout', { method: 'POST' });
   } catch {}
-  resetPortalState();
+  _portalSession = { user: null, linked: false, manager: null, teamCode: null, currentWeek: null };
+  _portalGames = [];
+  _portalLinkOptions = [];
+  _portalMatchCache = {};
+  savePortalMatchCache();
   updatePortalUI();
   renderSection(currentSection);
   toast('Signed out', 'info');
@@ -334,8 +508,6 @@ async function submitPortalLink(ev) {
       return;
     }
     await loadPortalSession();
-    _portalTradesBadgeAt = 0;
-    clearCachedPortalTrades();
     updatePortalUI();
     renderSection(currentSection);
     toast('Account linked — you can submit scores now', 'success');
@@ -412,8 +584,6 @@ async function submitPortalScorePayload(payload) {
   }
   state = await loadState();
   await loadPortalSession();
-  _portalTradesBadgeAt = 0;
-  clearCachedPortalTrades();
   updatePortalUI();
   renderSection(currentSection);
   toast('Score submitted successfully', 'success');
@@ -486,204 +656,6 @@ async function handlePortalGamePick(gameId) {
     }
   } catch {}
   openPortalManualScoreModal(game);
-}
-
-async function showProposeTrade() {
-  if (_portalBusy) return;
-  _portalBusy = true;
-  
-  try {
-    const r = await _portalFetch('/api/v2/me/roster');
-    if (!r.ok) {
-      const body = await r.json().catch(() => ({}));
-      toast(body.error || 'Could not load roster', 'error');
-      return;
-    }
-    const data = await r.json();
-    
-    if (data.deadlinePassed) {
-      toast('Trade deadline has passed', 'error');
-      return;
-    }
-    
-    openTradeProposalModal(data);
-  } catch (e) {
-    toast('Failed to load trade data', 'error');
-  } finally {
-    _portalBusy = false;
-  }
-}
-
-function openTradeProposalModal(data) {
-  const { myTeam, otherTeams } = data;
-  
-  const teamOptions = otherTeams.map(code => 
-    `<option value="${code}">${code}</option>`
-  ).join('');
-  
-  // Get my team's players from state
-  const myPlayers = state.players.filter(p => p.teamCode === myTeam).sort((a,b) => a.name.localeCompare(b.name));
-  const myPlayersList = myPlayers.length
-    ? myPlayers.map(p => `<label class="portal-checkbox-row"><input type="checkbox" class="trade-my-player" data-name="${p.name}"> ${p.name}</label>`).join('')
-    : '<div class="text-dim">No players on roster</div>';
-  
-  showModal('🔄 Propose Trade', `
-    <div class="form-row">
-      <label>Trade with</label>
-      <select id="trade-partner-select">
-        <option value="">— Select team —</option>
-        ${teamOptions}
-      </select>
-    </div>
-    
-    <div class="form-row">
-      <label>Your players (${myTeam})</label>
-      <div id="trade-my-players" style="max-height:200px;overflow-y:auto;border:1px solid #333;padding:8px;border-radius:4px">
-        ${myPlayersList}
-      </div>
-    </div>
-    
-    <div class="form-row">
-      <label>Their players</label>
-      <div id="trade-their-players" style="max-height:200px;overflow-y:auto;border:1px solid #333;padding:8px;border-radius:4px">
-        <div class="text-dim">Select a team first</div>
-      </div>
-    </div>
-    
-    <button id="modal-ok" class="btn btn-primary btn-block mt-12">Submit Trade Proposal</button>
-  `, async () => {
-    await submitTradeProposal();
-  });
-  
-  // Load partner roster when team selected
-  $('trade-partner-select')?.addEventListener('change', (e) => {
-    const partnerTeam = e.target.value;
-    if (!partnerTeam) {
-      $('trade-their-players').innerHTML = '<div class="text-dim">Select a team first</div>';
-      return;
-    }
-    
-    const partnerPlayers = state.players.filter(p => p.teamCode === partnerTeam).sort((a,b) => a.name.localeCompare(b.name));
-    const partnerPlayersList = partnerPlayers.length
-      ? partnerPlayers.map(p => `<label class="portal-checkbox-row"><input type="checkbox" class="trade-their-player" data-name="${p.name}"> ${p.name}</label>`).join('')
-      : '<div class="text-dim">No players on roster</div>';
-    
-    $('trade-their-players').innerHTML = partnerPlayersList;
-  });
-}
-
-async function showMyTrades() {
-  if (_portalBusy) return;
-  _portalBusy = true;
-  
-  try {
-    const data = await fetchPortalTrades({ preferCache: true });
-    
-    if (!data._ok) {
-      toast(data.error || 'Could not load trades', 'error');
-      return;
-    }
-    
-    const trades = data.trades || [];
-    const myTeam = data.myTeam || _portalSession?.teamCode;
-    
-    if (!myTeam) {
-      toast('Could not determine your team', 'error');
-      return;
-    }
-    
-    const tradesHtml = trades.length
-      ? trades.map(t => {
-          const payload = t.payload;
-          const isPending = t.status === 'pending';
-          const isApproved = t.status === 'approved';
-          const isRejected = t.status === 'rejected';
-          const statusIcon = isPending ? '⏳' : isApproved ? '✅' : '❌';
-          const statusText = isPending ? 'Pending' : isApproved ? 'Approved' : 'Rejected';
-          const statusColor = isPending ? '#f39c12' : isApproved ? '#27ae60' : '#e74c3c';
-          
-          const iProposed = payload.fromTeam === myTeam;
-          const otherTeam = iProposed ? payload.toTeam : payload.fromTeam;
-          const mySends = iProposed ? payload.playersSent : payload.playersReceived;
-          const myReceives = iProposed ? payload.playersReceived : payload.playersSent;
-          
-          const sendsStr = mySends && mySends.length ? mySends.join(', ') : '—';
-          const receivesStr = myReceives && myReceives.length ? myReceives.join(', ') : '—';
-          
-          return `
-            <div class="portal-trade-card" style="border:1px solid #333;border-radius:8px;padding:12px;margin-bottom:12px">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-                <div style="font-weight:600">${myTeam} ⇌ ${otherTeam}</div>
-                <div style="color:${statusColor};font-size:12px;font-weight:600">${statusIcon} ${statusText}</div>
-              </div>
-              <div style="font-size:13px;color:#aaa;margin-bottom:4px">You send: ${sendsStr}</div>
-              <div style="font-size:13px;color:#aaa">You receive: ${receivesStr}</div>
-              <div style="font-size:11px;color:#666;margin-top:8px">${timeSince(new Date(t.submitted_at))}</div>
-            </div>
-          `;
-        }).join('')
-      : '<div style="text-align:center;padding:40px;color:#666">No trade proposals yet</div>';
-    
-    showModal('📋 My Trades', `
-      <div style="max-height:400px;overflow-y:auto">
-        ${tradesHtml}
-      </div>
-    `, null, true);
-    
-  } catch (e) {
-    console.error('showMyTrades error:', e);
-    toast('Failed to load trades: ' + e.message, 'error');
-  } finally {
-    _portalTradesBadgeAt = 0;
-    _portalBusy = false;
-  }
-}
-
-async function submitTradeProposal() {
-  const partnerTeam = $('trade-partner-select')?.value;
-  if (!partnerTeam) {
-    toast('Select a trade partner', 'error');
-    return;
-  }
-  
-  const myPlayers = Array.from(document.querySelectorAll('.trade-my-player:checked')).map(cb => cb.dataset.name);
-  const theirPlayers = Array.from(document.querySelectorAll('.trade-their-player:checked')).map(cb => cb.dataset.name);
-  
-  if (!myPlayers.length && !theirPlayers.length) {
-    toast('Select at least one player', 'error');
-    return;
-  }
-  
-  const btn = $('modal-ok');
-  if (btn) btn.disabled = true;
-  
-  try {
-    const r = await _portalFetch('/api/v2/me/propose-trade', {
-      method: 'POST',
-      body: JSON.stringify({
-        otherTeam: partnerTeam,
-        playersSent: myPlayers,
-        playersReceived: theirPlayers,
-      }),
-    });
-    
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      toast(body.error || 'Could not submit trade', 'error');
-      if (btn) btn.disabled = false;
-      return;
-    }
-    
-    hideModal();
-    _portalTradesBadgeAt = 0;
-    clearCachedPortalTrades();
-    clearInflightPortalTrades();
-    updatePortalTradesBadge();
-    toast('Trade proposal submitted!', 'success');
-  } catch (e) {
-    toast('Failed to submit trade', 'error');
-    if (btn) btn.disabled = false;
-  }
 }
 
 function portalCardHTML() {
@@ -782,47 +754,14 @@ function portalCardHTML() {
           </div>
         </div>
         <div class="portal-games-stack">${gamesHtml}</div>
-        <div style="margin-top:16px;padding:0 16px 16px">
-          <button class="btn btn-secondary btn-block" id="portal-propose-trade-btn">🔄 Propose Trade</button>
-          <button class="btn btn-ghost btn-block" id="portal-my-trades-btn" style="margin-top:8px;position:relative">
-            📋 My Trades
-            <span id="portal-trades-badge" style="display:none;position:absolute;top:8px;right:12px;background:#e74c3c;color:#fff;padding:2px 6px;border-radius:10px;font-size:11px;font-weight:600;min-width:18px;text-align:center"></span>
-          </button>
-        </div>
       </div>
     </div>`;
-}
-
-async function updatePortalTradesBadge() {
-  if (!_portalSession?.linked) return;
-  if (Date.now() - _portalTradesBadgeAt < 15000) return;
-  try {
-    const data = await fetchPortalTrades({ preferCache: true });
-    if (data._ok && data.trades) {
-      _portalTradesBadgeAt = Date.now();
-      const pendingCount = data.trades.filter(t => t.status === 'pending').length;
-      const badge = $('portal-trades-badge');
-      if (badge) {
-        if (pendingCount > 0) {
-          badge.textContent = pendingCount;
-          badge.style.display = 'inline-block';
-        } else {
-          badge.style.display = 'none';
-        }
-      }
-    }
-  } catch (e) {
-    // Silently fail
-  }
 }
 
 function bindPortalDashboardActions() {
   $('portal-login-btn')?.addEventListener('click', () => startPortalLogin());
   $('portal-logout-btn')?.addEventListener('click', handlePortalLogout);
   $('portal-link-form')?.addEventListener('submit', submitPortalLink);
-  $('portal-propose-trade-btn')?.addEventListener('click', showProposeTrade);
-  $('portal-my-trades-btn')?.addEventListener('click', showMyTrades);
-  updatePortalTradesBadge();
   const rpcnInput = $('portal-zamboni-tag');
   const rpcnDrop = $('portal-rpcn-drop');
   if (rpcnInput) {
@@ -1275,50 +1214,8 @@ function showSetWeekModal(current, auto) {
   });
 }
 
-async function checkPendingTrades() {
-  if (!isAdmin) return;
-  try {
-    const r = await _apiFetch('/api/pending?status=pending', { 
-      headers: { 'Authorization': `Bearer ${_adminToken}` } 
-    });
-    const data = await r.json();
-    const count = data.length;
-    
-    // Update settings menu badge
-    const settingsBadge = document.querySelector('[data-sect="pending"] .settings-badge');
-    if (settingsBadge) {
-      if (count > 0) {
-        settingsBadge.textContent = count;
-        settingsBadge.style.display = 'inline-block';
-      } else {
-        settingsBadge.style.display = 'none';
-      }
-    }
-    
-    // Update nav button badge
-    const navBtn = document.querySelector('[data-nav="settings"]');
-    if (navBtn && count > 0) {
-      let badge = navBtn.querySelector('.nav-badge');
-      if (!badge) {
-        badge = document.createElement('span');
-        badge.className = 'nav-badge';
-        badge.style.cssText = 'position:absolute;top:4px;right:4px;background:#e74c3c;color:#fff;padding:2px 6px;border-radius:10px;font-size:10px;font-weight:600;min-width:18px;text-align:center';
-        navBtn.style.position = 'relative';
-        navBtn.appendChild(badge);
-      }
-      badge.textContent = count;
-    } else if (navBtn) {
-      const badge = navBtn.querySelector('.nav-badge');
-      if (badge) badge.remove();
-    }
-  } catch (e) {
-    // Silently fail
-  }
-}
-
 function renderDashboard() {
   const el_ = $('section-dashboard');
-  checkPendingTrades();
   const sysData = normalizeSysDataFile(state.sysDataFile);
   const standings = calcStandings();
   const recentGames = state.games
@@ -1339,7 +1236,7 @@ function renderDashboard() {
   const currentWeek = state.currentWeek !== null ? state.currentWeek : autoWeek;
   const upcoming    = sortGames(state.games.filter(g=>!g.played && !g.playoff && g.week === currentWeek)).slice(0,8);
 
-  const fmtTradeName = p => resolvePlayerName(p, '#');
+  const fmtTradeName = p => typeof p === 'string' ? p : (PLAYER_DB[p] || `#${p}`);
 
   // Hottest / coldest — L10, min 5 games to qualify, ties both shown (max 3)
   let hotTeams = [], coldTeams = [];
@@ -3233,7 +3130,7 @@ function renderTrades() {
 }
 
 function renderTradeCard(t) {
-  const fmtName = p => resolvePlayerName(p, 'Player #');
+  const fmtName = p => typeof p === 'string' ? p : (PLAYER_DB[p] || `Player #${p}`);
   const toList = v => Array.isArray(v) ? v : (v ? v.split(',').map(s => s.trim()).filter(Boolean) : []);
   const give = toList(t.playersSent).map(p => `<div class="text-sm">${fmtName(p)}</div>`).join('');
   const recv = toList(t.playersReceived).map(p => `<div class="text-sm">${fmtName(p)}</div>`).join('');
@@ -3666,6 +3563,7 @@ function initPlayoffs() {
   saveState();
 
   const stubCount = r1Series.length;
+  console.log('[Playoffs] Generated', stubCount, 'R1 stubs. Total playoff games in state:', state.games.filter(g => g.playoff).length, state.games.filter(g => g.playoff));
   toast(`Playoff bracket generated — ${stubCount} games added to Schedule ✓`, 'success');
   renderPlayoffs();
 }
@@ -4249,109 +4147,14 @@ function viewSeasonModal(seasonId) {
   `);
 }
 
-async function loadPendingTrades() {
-  const container = $('pending-trades-list');
-  if (!container) return;
-  
-  try {
-    const r = await _apiFetch('/api/pending?status=pending', {
-      headers: { 'Authorization': `Bearer ${_adminToken}` }
-    });
-    const pending = await r.json();
-    
-    if (!pending.length) {
-      container.innerHTML = '<div class="empty-state" style="padding:40px 0"><span class="empty-icon">✅</span><p>No pending trades</p></div>';
-      return;
-    }
-    
-    container.innerHTML = pending.map(req => {
-      const payload = req.payload;
-      const fmtPlayers = (arr) => arr && arr.length ? arr.join(', ') : '—';
-      const submittedAgo = req.submitted_at ? timeSince(new Date(req.submitted_at)) : '';
-      
-      return `
-        <div class="pending-trade-card" data-req-id="${req.id}">
-          <div class="pending-trade-header">
-            <div class="pending-trade-teams">${payload.fromTeam} ⇌ ${payload.toTeam}</div>
-            <div class="pending-trade-meta">Proposed by ${req.submitted_name} · ${submittedAgo}</div>
-          </div>
-          <div class="pending-trade-body">
-            <div class="pending-trade-side">
-              <div class="pending-trade-label">${payload.fromTeam} sends</div>
-              <div class="pending-trade-players">${fmtPlayers(payload.playersSent)}</div>
-            </div>
-            <div class="pending-trade-side">
-              <div class="pending-trade-label">${payload.toTeam} sends</div>
-              <div class="pending-trade-players">${fmtPlayers(payload.playersReceived)}</div>
-            </div>
-          </div>
-          <div class="pending-trade-actions">
-            <button class="btn btn-success btn-sm approve-trade-btn" data-req-id="${req.id}">✅ Approve</button>
-            <button class="btn btn-ghost btn-sm reject-trade-btn" data-req-id="${req.id}">❌ Reject</button>
-          </div>
-        </div>
-      `;
-    }).join('');
-    
-    document.querySelectorAll('.approve-trade-btn').forEach(btn => {
-      btn.addEventListener('click', () => reviewTrade(btn.dataset.reqId, 'approve'));
-    });
-    document.querySelectorAll('.reject-trade-btn').forEach(btn => {
-      btn.addEventListener('click', () => reviewTrade(btn.dataset.reqId, 'reject'));
-    });
-    
-  } catch (e) {
-    container.innerHTML = '<div class="text-dim" style="padding:20px">Failed to load pending trades</div>';
-  }
-}
-
-async function reviewTrade(reqId, action) {
-  try {
-    const r = await _apiFetch(`/api/pending/${reqId}`, {
-      method: 'PATCH',
-      headers: { 
-        'Authorization': `Bearer ${_adminToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ action })
-    });
-    
-    if (!r.ok) {
-      toast('Failed to ' + action + ' trade', 'error');
-      return;
-    }
-    
-    toast('Trade ' + (action === 'approve' ? 'approved' : 'rejected'), 'success');
-    loadPendingTrades();
-    checkPendingTrades();
-    state = await loadState();
-    renderTrades();
-  } catch (e) {
-    toast('Error reviewing trade', 'error');
-  }
-}
-
-function timeSince(date) {
-  const seconds = Math.floor((new Date() - date) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return minutes + 'm ago';
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return hours + 'h ago';
-  const days = Math.floor(hours / 24);
-  return days + 'd ago';
-}
-
 function renderSettings() {
   const el_ = $('section-settings');
-  checkPendingTrades();
   const sysData = normalizeSysDataFile(state.sysDataFile);
   const unassignedCount = NHL_TEAMS
     .filter(t => t.code !== 'UTI' && !state.teamOwners[t.code]).length;
 
   // ── MENU ──────────────────────────────────────────────────────
   if (!_settingsSection) {
-    
     const menuItems = [
       { id:'managers', icon:'👤', title:'Managers',
         sub:`${state.managers.length} managers · ${unassignedCount} unassigned` },
@@ -4360,7 +4163,6 @@ function renderSettings() {
       { id:'seasons', icon:'📅', title:'Seasons',
         sub:`Season ${state.currentSeason||1} · ${(state.seasons||[]).length} archived` },
       ...(isAdmin ? [
-        { id:'pending',  icon:'🔄', title:'Pending Trades', sub:'Review and approve trade proposals', badge: true },
         { id:'discord',  icon:'💬', title:'Discord',        sub:'Bot control · channel settings' },
         { id:'playoffs', icon:'🏆', title:'Playoff Format', sub:`${(state.playoffFormat||[]).length} rounds configured` },
         { id:'sysdata',  icon:'💾', title:'SYS-DATA',       sub: sysData ? `${sysData.name} · ${formatBytes(sysData.size)}` : 'No file uploaded' },
@@ -4376,10 +4178,7 @@ function renderSettings() {
           <button class="settings-menu-card" data-sect="${m.id}">
             <span class="settings-menu-icon">${m.icon}</span>
             <div class="settings-menu-text">
-              <div class="settings-menu-title">
-                ${m.title}
-                ${m.badge ? '<span class="settings-badge" style="display:none;margin-left:8px;background:#e74c3c;color:#fff;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600">0</span>' : ''}
-              </div>
+              <div class="settings-menu-title">${m.title}</div>
               <div class="settings-menu-sub">${m.sub}</div>
             </div>
             <span class="settings-menu-arrow">›</span>
@@ -4393,7 +4192,7 @@ function renderSettings() {
 
   // ── SECTION TITLES ────────────────────────────────────────────
   const TITLES = {
-    managers:'Managers', league:'League', seasons:'Seasons', pending:'Pending Trades',
+    managers:'Managers', league:'League', seasons:'Seasons',
     discord:'Discord', playoffs:'Playoff Format', sysdata:'SYS-DATA',
     rules:'League Rules', roster:'NHL Roster Data', data:'Data',
   };
@@ -4507,12 +4306,6 @@ function renderSettings() {
           <input id="new-manager-name" placeholder="New manager name…">
           <button class="btn btn-ghost btn-sm" id="add-manager-btn">+ Add</button>
         </div>` : ''}
-      </div>`; break;
-
-    case 'pending': _html = `
-      <div class="card">
-        <div class="card-title">Pending Trade Proposals</div>
-        <div id="pending-trades-list">Loading...</div>
       </div>`; break;
 
     case 'league': _html = `
@@ -4849,12 +4642,11 @@ function renderSettings() {
           document.querySelectorAll('.mgr-swatch').forEach(sw => sw.classList.toggle('swatch-active', sw === s));
         })
       );
-      $('mgr-detail-save')?.addEventListener('click', async () => {
+      $('mgr-detail-save')?.addEventListener('click', () => {
         const mid = $('mgr-detail-del')?.dataset.mid;
         if (!mid) return;
         const mgr = state.managers.find(m => m.id === mid);
         if (!mgr) return;
-        const hadDiscordId = mgr.discordId || '';
         const name  = $('mgr-d-name')?.value.trim();
         const color = $('mgr-d-color')?.value;
         if (name)  mgr.name  = name;
@@ -4872,12 +4664,6 @@ function renderSettings() {
         if (dun)  mgr.discordUsername = dun;  else delete mgr.discordUsername;
         if (ztag) mgr.zamboniTag      = ztag; else delete mgr.zamboniTag;
         saveState();
-        try {
-          await _apiFetch('/api/v2/admin/links/sync', {
-            method: 'POST',
-            body: JSON.stringify({ manager_id: mid, discord_id: did, zamboni_tag: ztag }),
-          });
-        } catch {}
         _updateMgrListItem(mid);
         if ($('mgr-detail-title')) $('mgr-detail-title').textContent = mgr.name;
         if (color && $('mgr-detail-dot')) $('mgr-detail-dot').style.background = color;
@@ -4888,21 +4674,15 @@ function renderSettings() {
         if (fb) { fb.classList.remove('hidden'); setTimeout(() => fb.classList.add('hidden'), 2500); }
         toast(`${mgr.name} saved`, 'success');
       });
-      $('mgr-detail-del')?.addEventListener('click', async () => {
+      $('mgr-detail-del')?.addEventListener('click', () => {
         const mid = $('mgr-detail-del').dataset.mid;
         if (!mid) return;
         const mgr = state.managers.find(m => m.id === mid);
-        if (!confirm(`Remove manager "${mgr?.name}"? Their portal login link will also be cleared.`)) return;
+        if (!confirm(`Remove manager "${mgr?.name}"?`)) return;
         state.managers = state.managers.filter(m => m.id !== mid);
         Object.keys(state.teamOwners).forEach(k   => { if (state.teamOwners[k]   === mid) delete state.teamOwners[k]; });
         Object.keys(state.teamCoOwners).forEach(k => { if (state.teamCoOwners[k] === mid) delete state.teamCoOwners[k]; });
         saveState();
-        try {
-          await _apiFetch('/api/v2/admin/links/unlink', {
-            method: 'POST',
-            body: JSON.stringify({ manager_id: mid }),
-          });
-        } catch {}
         renderSettings();
       });
       function _applyMgrFilter() {
@@ -4956,11 +4736,6 @@ function renderSettings() {
         });
         inp.addEventListener('blur', () => setTimeout(() => drop.classList.remove('open'), 150));
       })();
-      break;
-    }
-
-    case 'pending': {
-      loadPendingTrades();
       break;
     }
 
@@ -5286,7 +5061,7 @@ function updatePortalUI() {
   $('portal-badge')?.classList.toggle('hidden', !_portalSession?.linked);
   if ($('portal-toggle-btn')) {
     $('portal-toggle-btn').textContent = _portalSession?.user
-      ? (_portalSession?.linked ? 'Player Portal' : 'Finish Signup')
+      ? (_portalSession?.linked ? 'My Scores' : 'Finish Signup')
       : 'Player Login';
   }
 }
@@ -5410,8 +5185,11 @@ async function init() {
       state._lastRosterFetch = Date.now();
       saveState();
       renderSection(currentSection);
-      if (fresh) toast(`✓ ${state.players.length} players loaded`, 'success');
+      await autoLoadRatings();
+      if (fresh) toast(`✓ ${state.players.length} players loaded · ratings applied`, 'success');
     }, 500);
+  } else if (state.players.length && state.players.some(p => !p.ovr)) {
+    setTimeout(autoLoadRatings, 800);
   }
 }
 

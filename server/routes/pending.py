@@ -102,6 +102,12 @@ def review_pending(req_id):
         WHERE id=?
     """, (status, reviewed_at, notes, req_id))
     conn.commit()
+    
+    # Send Discord notifications for trade approval/rejection
+    if row['type'] == 'trade':
+        payload = json.loads(row['payload'])
+        _send_trade_review_notifications(row['submitted_by'], payload, action == 'approve', conn)
+    
     conn.close()
 
     result = {'ok': True, 'status': status}
@@ -344,3 +350,42 @@ def _apply_trade(state, payload):
     state.setdefault('trades', []).insert(0, trade)
     _apply_trade_history(state)
     return trade
+
+
+def _send_trade_review_notifications(proposer_discord_id, payload, approved, conn):
+    """Send Discord DMs to both GMs when trade is approved or rejected"""
+    from server.routes.bot_events import queue_bot_event
+    
+    # Get state to find other GM's Discord ID
+    state_row = conn.execute("SELECT data FROM league_state WHERE id=1").fetchone()
+    if not state_row:
+        return
+    
+    state = json.loads(state_row['data'])
+    from_team = payload.get('fromTeam')
+    to_team = payload.get('toTeam')
+    
+    # Find other GM's Discord ID
+    other_manager_id = next((mid for code, mid in state.get('teamOwners', {}).items() if code == to_team), None)
+    other_discord_id = None
+    if other_manager_id:
+        other_link = conn.execute('SELECT discord_id FROM user_links WHERE manager_id = ?', (other_manager_id,)).fetchone()
+        if other_link:
+            other_discord_id = other_link['discord_id']
+    
+    # Queue notifications
+    event_type = 'trade_approved' if approved else 'trade_rejected'
+    notification_payload = {
+        'fromTeam': from_team,
+        'toTeam': to_team,
+        'playersSent': payload.get('playersSent', []),
+        'playersReceived': payload.get('playersReceived', []),
+    }
+    
+    # Notify proposer
+    if proposer_discord_id:
+        queue_bot_event(event_type, {**notification_payload, 'targetDiscordId': proposer_discord_id})
+    
+    # Notify other GM (only if approved)
+    if approved and other_discord_id:
+        queue_bot_event(event_type, {**notification_payload, 'targetDiscordId': other_discord_id})
