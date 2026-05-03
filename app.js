@@ -1,10 +1,478 @@
 ﻿/* ============================================================
    NHL Legacy League Manager — app.js
+   
+   Main application logic for admin panel, public dashboard,
+   settings, trades, games, schedules, and draft management.
+   
+   Modular structure (load order):
+   1. draft.js          — draft logic
+   2. portal-shared.js  — portal session/cache/fetch helpers
+   3. portal-ui.js      — portal UI actions (login/trades)
+   4. admin-pending.js  — admin pending trade review
+   5. app.js            — this file (core app logic)
+   
    Pure HTML/CSS/JS, no dependencies, no build step.
-   Data persisted in localStorage.
+   Data persisted in localStorage + backend API.
    ============================================================ */
 
 'use strict';
+
+// ================================================================
+// FEATURE FLAGS
+// ================================================================
+const FEATURE_FLAGS = {
+  ENABLE_PLAYER_STATS: false,  // Set to true when you have automated stats API
+  ENABLE_MANUAL_STATS: false   // Manual stat entry (too much work without API)
+};
+
+// ================================================================
+// 1. AUTO-UPDATE DETECTION
+// ================================================================
+let _currentVersion = null;
+
+async function checkForUpdates() {
+  try {
+    const response = await fetch('/version.json?t=' + Date.now(), {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' }
+    });
+    
+    if (!response.ok) {
+      console.warn('[Update] Failed to fetch version.json:', response.status);
+      return;
+    }
+    
+    const data = await response.json();
+    console.log('[Update] Current:', _currentVersion, 'Remote:', data.timestamp);
+    
+    if (!_currentVersion) {
+      _currentVersion = data.timestamp;
+      return;
+    }
+    
+    if (data.timestamp !== _currentVersion) {
+      console.log('[Update] New version detected! Auto-reloading in 2 seconds...');
+      
+      // Show brief notification before reload
+      const updateToast = document.createElement('div');
+      updateToast.id = 'update-toast';
+      updateToast.innerHTML = `
+        <div style="display:flex;align-items:center;gap:12px">
+          <span>🔄 Updating...</span>
+        </div>
+      `;
+      updateToast.style.cssText = 'position:fixed;top:20px;right:20px;z-index:10000;padding:12px 20px;background:#1a3a5a;border:1px solid #4a8cc8;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.3);font-size:0.9rem;color:#fff';
+      document.body.appendChild(updateToast);
+      
+      // Auto-reload after 2 seconds
+      setTimeout(() => {
+        location.reload();
+      }, 2000);
+    }
+  } catch (err) {
+    console.warn('[Update] Error checking for updates:', err);
+  }
+}
+
+// Check for updates every 30 seconds
+setInterval(checkForUpdates, 30000);
+checkForUpdates();
+
+// ================================================================
+// 1b. LIVE DATA UPDATES via Server-Sent Events
+// ================================================================
+let _sseSource = null;
+let _sseReconnectDelay = 1000;
+let _lastSelfSaveAt = 0; // set by saveState so we can suppress echo updates
+
+function _isModalOpen() {
+  const m = document.getElementById('modal-overlay');
+  return m && !m.classList.contains('hidden');
+}
+
+let _pendingLiveReload = false;
+
+async function _liveReloadState() {
+  // Don't yank state while a modal is open — its Save handler holds refs
+  // into the current state. Queue it to run right after hideModal.
+  if (_isModalOpen()) {
+    _pendingLiveReload = true;
+    console.log('[Live] Reload deferred - modal is open');
+    return;
+  }
+  try {
+    console.log('[Live] Reloading state and re-rendering:', currentSection);
+    const playedBefore = state.games.filter(g => g.played).length;
+    const fresh = await loadState();
+    if (!fresh) {
+      console.warn('[Live] loadState returned nothing');
+      return;
+    }
+    // Preserve local-only fields the server doesn't own
+    const preserved = {
+      sysDataFile: state.sysDataFile,
+    };
+    Object.assign(state, fresh, preserved);
+    const playedAfter = state.games.filter(g => g.played).length;
+    console.log(`[Live] Games played: ${playedBefore} → ${playedAfter} (fresh had ${fresh.games.filter(g => g.played).length})`);
+    
+    // Re-render the current section
+    if (typeof renderSection === 'function' && currentSection) {
+      console.log('[Live] Re-rendering current section:', currentSection);
+      
+      // Update page title to show refresh happened (debug)
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString();
+      document.title = `NHL Legacy (updated ${timeStr})`;
+      
+      renderSection(currentSection);
+      console.log('[Live] Re-rendered:', currentSection);
+      
+      // Visual feedback: flash the section to show it updated
+      const sectionEl = document.getElementById(`section-${currentSection}`);
+      if (sectionEl) {
+        sectionEl.style.transition = 'opacity 0.2s';
+        sectionEl.style.opacity = '0.5';
+        setTimeout(() => {
+          sectionEl.style.opacity = '1';
+        }, 100);
+      }
+      
+      // FORCE a full DOM update by triggering a reflow
+      const mainContent = document.getElementById('main-content');
+      if (mainContent) {
+        void mainContent.offsetHeight; // Force reflow
+      }
+    } else {
+      console.warn('[Live] renderSection not available or no currentSection');
+    }
+  } catch (err) {
+    console.warn('[Live] reload failed:', err);
+  }
+}
+
+function _handleDraftPickMade(data) {
+  // Optimized handler for draft_pick_made event
+  // Updates only the necessary parts without full reload
+  
+  const pick = data?.pick;
+  const nextOnClock = data?.nextOnClock;
+  const draftComplete = data?.draftComplete;
+  
+  if (!pick) return;
+  
+  // Show toast notification
+  toast(`${pick.playerName} (${pick.position}) → ${pick.managerName}`, 'info');
+  
+  // Update admin draft module if loaded
+  if (window.DraftModule && typeof window.DraftModule.handleLivePick === 'function') {
+    window.DraftModule.handleLivePick(pick, nextOnClock, draftComplete);
+  }
+  
+  // Update portal draft if loaded
+  if (typeof renderPortalDraft === 'function' && currentSection === 'draft') {
+    // Reload state first to get updated picks, then re-render
+    loadState().then(() => {
+      renderPortalDraft();
+    });
+  }
+  
+  // If on teams page, update the roster count
+  if (currentSection === 'teams') {
+    // Just reload state and re-render teams for now
+    // TODO: Make this more targeted later
+    _liveReloadState();
+  }
+  
+  // If draft is complete, show celebration
+  if (draftComplete) {
+    setTimeout(() => {
+      toast('🎉 Draft Complete!', 'success');
+    }, 500);
+  }
+}
+
+function _handleScoreUpdated(data) {
+  // Optimized handler for score_updated event
+  // Updates only the affected game without full reload
+  
+  if (!data || !data.gameId) return;
+  
+  // Show toast notification
+  const scoreText = `${data.homeTeam} ${data.homeScore} - ${data.awayScore} ${data.awayTeam}${data.ot ? ' (OT)' : ''}`;
+  toast(scoreText, 'info');
+  
+  // If on scores or schedule page, reload state and re-render
+  // TODO: Make this more targeted (just update the game card)
+  if (currentSection === 'scores' || currentSection === 'schedule') {
+    loadState().then(() => {
+      renderSection(currentSection);
+    });
+  }
+  
+  // If on standings page, reload (score affects standings)
+  if (currentSection === 'standings') {
+    loadState().then(() => {
+      renderStandings();
+    });
+  }
+}
+
+function _handleScoreApproved(data) {
+  // Handler for score_approved event
+  // Notifies submitter that their score was approved
+  
+  if (!data || !data.gameId) return;
+  
+  // Show toast notification
+  const scoreText = `${data.homeTeam} ${data.homeScore} - ${data.awayScore} ${data.awayTeam}`;
+  toast(`Score approved: ${scoreText}`, 'success');
+  
+  // If on scores page, reload and re-render
+  if (currentSection === 'scores' || currentSection === 'schedule') {
+    loadState().then(() => {
+      renderSection(currentSection);
+    });
+  }
+  
+  // Update standings if visible
+  if (currentSection === 'standings') {
+    loadState().then(() => {
+      renderStandings();
+    });
+  }
+}
+
+function _handleTradeProposed(data) {
+  // Handler for trade_proposed event
+  // Notifies target manager of trade offer
+  
+  if (!data || !data.tradeId) return;
+  
+  // Show toast notification
+  const offeredPlayers = data.playersOffered?.map(p => p.name).join(', ') || 'players';
+  const requestedPlayers = data.playersRequested?.map(p => p.name).join(', ') || 'players';
+  toast(`Trade offer from ${data.fromManager?.name}: ${requestedPlayers} for ${offeredPlayers}`, 'info');
+  
+  // If on trades page, reload and re-render
+  if (currentSection === 'trades') {
+    loadState().then(() => {
+      renderTrades();
+    });
+  }
+}
+
+function _handleTradeCompleted(data) {
+  // Handler for trade_completed event
+  // Notifies involved managers that trade was approved
+  
+  if (!data || !data.tradeId) return;
+  
+  // Show toast notification
+  toast(`Trade completed: ${data.fromTeam} ↔ ${data.toTeam}`, 'success');
+  
+  // If on trades page, reload and re-render
+  if (currentSection === 'trades') {
+    loadState().then(() => {
+      renderTrades();
+    });
+  }
+  
+  // If on teams page, reload rosters
+  if (currentSection === 'teams') {
+    loadState().then(() => {
+      renderTeams();
+    });
+  }
+}
+
+function _handleLiveEvent(evt) {
+  let msg;
+  try { msg = JSON.parse(evt.data); } catch { return; }
+  const { type, data } = msg;
+
+  // Visual indicator for live updates
+  _showLiveUpdateIndicator(type);
+
+  // Suppress echo: if we saved within the last 1.5s, our own change just
+  // round-tripped. Don't pull and re-render.
+  if (type === 'state_updated' && (Date.now() - _lastSelfSaveAt) < 1500) {
+    console.log('[Live] Echo suppressed - ignoring state_updated');
+    return;
+  }
+
+  switch (type) {
+    case 'connected':
+      console.log('[Live] SSE connected');
+      break;
+    case 'state_updated':
+      console.log('[Live] state_updated — refreshing');
+      _liveReloadState();
+      break;
+    case 'draft_pick':
+      // Legacy event - still reload for backwards compatibility
+      console.log('[Live] draft_pick (legacy)', data);
+      _liveReloadState();
+      toast(`Pick: ${data?.pick?.playerName || 'player'}`, 'info');
+      break;
+    case 'draft_pick_made':
+      // Optimized draft event - targeted update
+      console.log('[Live] draft_pick_made', data);
+      _handleDraftPickMade(data);
+      break;
+    case 'trade_proposed':
+      // New trade proposal
+      console.log('[Live] trade_proposed', data);
+      _handleTradeProposed(data);
+      break;
+    case 'trade_completed':
+      // Trade was approved and applied
+      console.log('[Live] trade_completed', data);
+      _handleTradeCompleted(data);
+      break;
+    case 'trade_applied':
+      // Legacy event - still reload for backwards compatibility
+      console.log('[Live] trade_applied (legacy)', data);
+      _liveReloadState();
+      toast('Trade applied', 'success');
+      break;
+    case 'score_updated':
+      // Enhanced score event with full data
+      console.log('[Live] score_updated', data);
+      _handleScoreUpdated(data);
+      break;
+    case 'score_approved':
+      // Score was approved by admin
+      console.log('[Live] score_approved', data);
+      _handleScoreApproved(data);
+      break;
+    case 'pending_new':
+      console.log('[Live] pending_new', data);
+      // Refresh the admin pending panel if it's loaded
+      try {
+        if (typeof refreshPendingList === 'function') refreshPendingList();
+        if (typeof window !== 'undefined' && typeof window.loadPendingCount === 'function') window.loadPendingCount();
+      } catch {}
+      if (isAdmin) toast(`New ${data?.type || 'request'} pending`, 'info');
+      break;
+    default:
+      // Unknown event, ignore
+      break;
+  }
+}
+
+function _connectSSE() {
+  try {
+    if (_sseSource) { try { _sseSource.close(); } catch {} }
+    _sseSource = new EventSource('/api/events');
+    _sseSource.onmessage = _handleLiveEvent;
+    _sseSource.onopen = () => { _sseReconnectDelay = 1000; };
+    _sseSource.onerror = () => {
+      // EventSource auto-reconnects, but if the server drops we want a backoff
+      try { _sseSource.close(); } catch {}
+      _sseSource = null;
+      const delay = Math.min(_sseReconnectDelay, 15000);
+      console.warn(`[Live] SSE disconnected, retrying in ${delay}ms`);
+      setTimeout(_connectSSE, delay);
+      _sseReconnectDelay = Math.min(_sseReconnectDelay * 2, 15000);
+    };
+  } catch (err) {
+    console.warn('[Live] failed to open EventSource:', err);
+  }
+}
+
+// Visual indicator for live updates
+let _indicatorQueue = [];
+let _indicatorShowing = false;
+
+function _showLiveUpdateIndicator(eventType) {
+  if (eventType === 'connected') return; // Skip connection events
+  
+  // Skip state_updated if we just showed a more specific event
+  if (eventType === 'state_updated' && _indicatorQueue.length > 0) return;
+  
+  const icons = {
+    'score_updated': '⚽',
+    'score_approved': '✅',
+    'trade_proposed': '📩',
+    'trade_completed': '🤝',
+    'trade_applied': '🤝',
+    'draft_pick': '🎯',
+    'draft_pick_made': '🎯',
+    'state_updated': '💾',
+    'pending_new': '🔔'
+  };
+  const labels = {
+    'score_updated': 'Score Updated',
+    'score_approved': 'Score Approved',
+    'trade_proposed': 'Trade Proposed',
+    'trade_completed': 'Trade Completed',
+    'trade_applied': 'Trade Applied',
+    'draft_pick': 'Draft Pick',
+    'draft_pick_made': 'Draft Pick',
+    'state_updated': 'Data Updated',
+    'pending_new': 'New Pending'
+  };
+  
+  const icon = icons[eventType] || '📡';
+  const label = labels[eventType] || 'Live Update';
+  
+  _indicatorQueue.push({ icon, label });
+  
+  if (!_indicatorShowing) {
+    _showNextIndicator();
+  }
+}
+
+function _showNextIndicator() {
+  if (_indicatorQueue.length === 0) {
+    _indicatorShowing = false;
+    return;
+  }
+  
+  _indicatorShowing = true;
+  const { icon, label } = _indicatorQueue.shift();
+  
+  // Create indicator if it doesn't exist
+  let indicator = document.getElementById('live-update-indicator');
+  if (!indicator) {
+    indicator = document.createElement('div');
+    indicator.id = 'live-update-indicator';
+    indicator.style.cssText = `
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 12px 20px;
+      border-radius: 8px;
+      box-shadow: 0 4px 20px rgba(102, 126, 234, 0.4);
+      font-size: 14px;
+      font-weight: 600;
+      z-index: 10000;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      pointer-events: none;
+    `;
+    document.body.appendChild(indicator);
+  }
+  
+  indicator.textContent = `${icon} ${label}`;
+  indicator.style.opacity = '1';
+  
+  // Fade out after 2 seconds, then show next
+  setTimeout(() => {
+    indicator.style.opacity = '0';
+    setTimeout(_showNextIndicator, 300);
+  }, 2000);
+}
+
+// Connect once the page is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _connectSSE);
+} else {
+  _connectSSE();
+}
 
 // ================================================================
 // 2.  NHL TEAMS  (IDs match NHLView NG / SYS-DATA team records)
@@ -111,7 +579,7 @@ const MANAGER_COLORS = ["#CE1126","#1f6feb","#3fb950","#d29922","#a371f7","#39d3
 const STORAGE_KEY = 'nhl-legacy-league-v2';
 
 const defaultState = () => ({
-  league:        { name: 'NHL Legacy League', season: '', adminHash: '' },
+  league:        { name: 'NHL Legacy League', season: '', adminHash: '', draftEnabled: false },
   managers:      [],        // [{id, name, color}]
   teamOwners:    {},        // {teamCode: managerId}
   players:       [],        // from NHL API: [{id, name, teamCode, position, headshot, number}]
@@ -295,54 +763,7 @@ function portalGameSummary(g) {
   return `${g.homeTeam} vs ${g.awayTeam}`;
 }
 
-async function startPortalLogin(next = window.location.pathname || '/') {
-  window.location.href = `/api/v2/oauth/discord/start?next=${encodeURIComponent(next)}`;
-}
-
-async function handlePortalLogout() {
-  try {
-    await _portalFetch('/api/v2/user/logout', { method: 'POST' });
-  } catch {}
-  resetPortalState();
-  updatePortalUI();
-  renderSection(currentSection);
-  toast('Signed out', 'info');
-}
-
-async function submitPortalLink(ev) {
-  ev.preventDefault();
-  if (_portalBusy) return;
-  
-  // Small delay to ensure mobile browsers have updated select value
-  await new Promise(resolve => setTimeout(resolve, 50));
-  
-  const managerId = $('portal-manager-select')?.value || '';
-  const zamboniTag = $('portal-zamboni-tag')?.value.trim() || '';
-  if (!managerId || !zamboniTag) {
-    toast('Pick your manager and enter your RPCN account', 'error');
-    return;
-  }
-  _portalBusy = true;
-  try {
-    const r = await _portalFetch('/api/v2/me/link-manager', {
-      method: 'POST',
-      body: JSON.stringify({ managerId, zamboniTag }),
-    });
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      toast(body.error || 'Could not link account', 'error');
-      return;
-    }
-    await loadPortalSession();
-    _portalTradesBadgeAt = 0;
-    clearCachedPortalTrades();
-    updatePortalUI();
-    renderSection(currentSection);
-    toast('Account linked — you can submit scores now', 'success');
-  } finally {
-    _portalBusy = false;
-  }
-}
+// Portal login/logout/link handlers moved to portal-ui.js
 
 function openPortalScoreModal(gameId) {
   const game = _portalGames.find(g => String(g.id) === String(gameId));
@@ -370,7 +791,12 @@ function openPortalManualScoreModal(game) {
       <div>${portalGameLabel(game)}</div>
       <div>${game.homeManagerName || '—'} vs ${game.awayManagerName || '—'}</div>
     </div>
-    <button id="modal-ok" class="btn btn-primary btn-block mt-12">Submit Score</button>
+    ${FEATURE_FLAGS.ENABLE_MANUAL_STATS ? `
+      <button id="modal-ok" class="btn btn-primary btn-block mt-12">Next: Add Player Stats (Optional)</button>
+      <button id="portal-skip-stats-btn" class="btn btn-ghost btn-block mt-8" type="button">Skip Stats & Submit</button>
+    ` : `
+      <button id="modal-ok" class="btn btn-primary btn-block mt-12">Submit Score</button>
+    `}
   `, async () => {
     const hs = parseInt($('portal-home-score')?.value, 10);
     const as = parseInt($('portal-away-score')?.value, 10);
@@ -383,7 +809,32 @@ function openPortalManualScoreModal(game) {
       toast('Scores cannot be tied', 'error');
       return;
     }
-    const btn = $('modal-ok');
+    
+    // If manual stats enabled, go to stats entry. Otherwise submit directly.
+    if (FEATURE_FLAGS.ENABLE_MANUAL_STATS) {
+      openPortalPlayerStatsModal(game, hs, as, ot);
+    } else {
+      try {
+        await submitPortalScorePayload({ gameId: game.id, homeScore: hs, awayScore: as, ot });
+        hideModal();
+      } catch {
+        toast('Could not submit score', 'error');
+      }
+    }
+  });
+  $('portal-skip-stats-btn')?.addEventListener('click', async () => {
+    const hs = parseInt($('portal-home-score')?.value, 10);
+    const as = parseInt($('portal-away-score')?.value, 10);
+    const ot = !!$('portal-ot-check')?.checked;
+    if (!Number.isFinite(hs) || !Number.isFinite(as)) {
+      toast('Enter both scores', 'error');
+      return;
+    }
+    if (hs === as) {
+      toast('Scores cannot be tied', 'error');
+      return;
+    }
+    const btn = $('portal-skip-stats-btn');
     if (btn) {
       btn.disabled = true;
       btn.textContent = 'Submitting…';
@@ -395,10 +846,427 @@ function openPortalManualScoreModal(game) {
       toast('Could not submit score', 'error');
       if (btn) {
         btn.disabled = false;
-        btn.textContent = 'Submit Score';
+        btn.textContent = 'Skip Stats & Submit';
       }
     }
   });
+}
+
+function openPortalPlayerStatsModal(game, homeScore, awayScore, ot) {
+  const homeRoster = state.players.filter(p => p.teamCode === game.homeTeam);
+  const awayRoster = state.players.filter(p => p.teamCode === game.awayTeam);
+  
+  // Separate goalies from skaters
+  const homeGoalies = homeRoster.filter(p => p.position === 'G');
+  const awayGoalies = awayRoster.filter(p => p.position === 'G');
+  const homeSkaters = homeRoster.filter(p => p.position !== 'G');
+  const awaySkaters = awayRoster.filter(p => p.position !== 'G');
+  
+  const skaterRow = (p, team) => `
+    <tr data-player-id="${p.id}" data-team="${team}" data-position="skater">
+      <td class="text-left"><strong>${p.name}</strong> <span class="text-xs text-muted">${p.position || ''}</span></td>
+      <td><input type="number" class="stat-input stat-g" min="0" max="9" value="0" inputmode="numeric"></td>
+      <td><input type="number" class="stat-input stat-a" min="0" max="9" value="0" inputmode="numeric"></td>
+      <td><input type="number" class="stat-input stat-pm" min="-9" max="9" value="0" inputmode="numeric"></td>
+      <td><input type="number" class="stat-input stat-pim" min="0" max="99" value="0" inputmode="numeric"></td>
+    </tr>
+  `;
+  
+  const goalieSelect = (goalies, team, opponentScore) => {
+    if (!goalies || goalies.length === 0) {
+      return '<tr><td colspan="6" class="text-dim text-center">No goalies on roster</td></tr>';
+    }
+    
+    return `
+      <tr data-team="${team}" data-position="goalie">
+        <td class="text-left">
+          <select class="goalie-select" data-team="${team}">
+            <option value="">— Select Goalie —</option>
+            ${goalies.map(g => `<option value="${g.id}">${g.name}</option>`).join('')}
+          </select>
+        </td>
+        <td><input type="number" class="stat-input stat-sa" min="0" max="99" value="0" inputmode="numeric" placeholder="0" disabled></td>
+        <td><input type="number" class="stat-input stat-sv" min="0" max="99" value="0" inputmode="numeric" placeholder="0" disabled></td>
+        <td><input type="number" class="stat-input stat-ga" min="0" max="99" value="${opponentScore}" inputmode="numeric" disabled></td>
+        <td class="stat-svp">—</td>
+        <td><label class="stat-so-check"><input type="checkbox" class="stat-so" disabled> SO</label></td>
+      </tr>
+    `;
+  };
+  
+  showModal(`Player Stats — ${portalGameSummary(game)}`, `
+    <div class="portal-stats-upload-section mb-12">
+      <p class="text-xs text-muted mb-8">Upload screenshots for automatic stat extraction (optional)</p>
+      <div class="form-row">
+        <label>Box Score Screenshot</label>
+        <input type="file" id="portal-box-score-upload" accept="image/*" class="file-input">
+        <p class="text-xs text-muted">Goal summary screen from NHL Legacy</p>
+      </div>
+      <div class="form-row">
+        <label>Detailed Stats Screenshot (optional)</label>
+        <input type="file" id="portal-stats-upload" accept="image/*" class="file-input">
+        <p class="text-xs text-muted">Full player stats table (shots, hits, +/-, etc.)</p>
+      </div>
+      <button id="portal-process-ocr-btn" class="btn btn-secondary btn-sm" type="button" disabled>Process Screenshots</button>
+    </div>
+    
+    <div class="portal-stats-manual-section">
+      <p class="text-xs text-muted mb-8">Or enter stats manually (only fill in players who contributed)</p>
+      
+      <!-- HOME TEAM -->
+      <h4 class="text-sm font-bold mb-4 mt-16">${game.homeTeam} Goalies</h4>
+      <div class="table-wrap mb-12">
+        <table class="portal-stats-table">
+          <thead>
+            <tr>
+              <th class="text-left">Goalie</th>
+              <th>SA</th>
+              <th>SV</th>
+              <th>GA</th>
+              <th>SV%</th>
+              <th>SO</th>
+            </tr>
+          </thead>
+          <tbody id="home-goalies-body">
+            ${goalieSelect(homeGoalies, game.homeTeam, awayScore)}
+          </tbody>
+        </table>
+      </div>
+      
+      <h4 class="text-sm font-bold mb-4">${game.homeTeam} Skaters</h4>
+      <div class="table-wrap mb-12" style="max-height:200px;overflow-y:auto">
+        <table class="portal-stats-table">
+          <thead>
+            <tr>
+              <th class="text-left">Player</th>
+              <th>G</th>
+              <th>A</th>
+              <th>+/-</th>
+              <th>PIM</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${homeSkaters.map(p => skaterRow(p, game.homeTeam)).join('')}
+          </tbody>
+        </table>
+      </div>
+      
+      <!-- AWAY TEAM -->
+      <h4 class="text-sm font-bold mb-4 mt-16">${game.awayTeam} Goalies</h4>
+      <div class="table-wrap mb-12">
+        <table class="portal-stats-table">
+          <thead>
+            <tr>
+              <th class="text-left">Goalie</th>
+              <th>SA</th>
+              <th>SV</th>
+              <th>GA</th>
+              <th>SV%</th>
+              <th>SO</th>
+            </tr>
+          </thead>
+          <tbody id="away-goalies-body">
+            ${goalieSelect(awayGoalies, game.awayTeam, homeScore)}
+          </tbody>
+        </table>
+      </div>
+      
+      <h4 class="text-sm font-bold mb-4">${game.awayTeam} Skaters</h4>
+      <div class="table-wrap mb-12" style="max-height:200px;overflow-y:auto">
+        <table class="portal-stats-table">
+          <thead>
+            <tr>
+              <th class="text-left">Player</th>
+              <th>G</th>
+              <th>A</th>
+              <th>+/-</th>
+              <th>PIM</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${awaySkaters.map(p => skaterRow(p, game.awayTeam)).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    
+    <button id="modal-ok" class="btn btn-primary btn-block mt-12">Submit Score with Stats</button>
+    <button id="portal-submit-no-stats-btn" class="btn btn-ghost btn-block mt-8" type="button">Submit Without Stats</button>
+  `, async () => {
+    const playerStats = collectPlayerStats();
+    
+    // Validate stats match the score
+    const validation = validatePlayerStats(playerStats, game.homeTeam, game.awayTeam, homeScore, awayScore);
+    if (!validation.valid) {
+      toast(validation.error, 'error');
+      return;
+    }
+    
+    const btn = $('modal-ok');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Submitting…';
+    }
+    try {
+      await submitPortalScorePayload({
+        gameId: game.id,
+        homeScore,
+        awayScore,
+        ot,
+        playerStats,
+        statsSource: 'manual'
+      });
+      hideModal();
+    } catch {
+      toast('Could not submit score', 'error');
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Submit Score with Stats';
+      }
+    }
+  });
+  
+  // Enable OCR button when files are selected
+  const boxScoreInput = $('portal-box-score-upload');
+  const statsInput = $('portal-stats-upload');
+  const ocrBtn = $('portal-process-ocr-btn');
+  
+  const checkFiles = () => {
+    if (ocrBtn) {
+      ocrBtn.disabled = !boxScoreInput?.files?.length && !statsInput?.files?.length;
+    }
+  };
+  
+  boxScoreInput?.addEventListener('change', checkFiles);
+  statsInput?.addEventListener('change', checkFiles);
+  
+  // Enable goalie stats inputs when goalie is selected
+  document.querySelectorAll('.goalie-select').forEach(select => {
+    const row = select.closest('tr');
+    const inputs = row.querySelectorAll('.stat-input, .stat-so');
+    
+    select.addEventListener('change', () => {
+      const selected = select.value;
+      inputs.forEach(input => {
+        input.disabled = !selected;
+      });
+      
+      // Set player ID on the row
+      if (selected) {
+        row.dataset.playerId = selected;
+      } else {
+        delete row.dataset.playerId;
+      }
+    });
+  });
+  
+  // Auto-calculate save percentage for goalies
+  document.querySelectorAll('[data-position="goalie"]').forEach(row => {
+    const saInput = row.querySelector('.stat-sa');
+    const svInput = row.querySelector('.stat-sv');
+    const svpCell = row.querySelector('.stat-svp');
+    
+    const updateSvp = () => {
+      const sa = parseInt(saInput?.value, 10) || 0;
+      const sv = parseInt(svInput?.value, 10) || 0;
+      if (sa > 0) {
+        const svp = (sv / sa * 100).toFixed(1);
+        svpCell.textContent = `.${svp.replace('.', '').padStart(3, '0')}`;
+      } else {
+        svpCell.textContent = '—';
+      }
+    };
+    
+    saInput?.addEventListener('input', updateSvp);
+    svInput?.addEventListener('input', updateSvp);
+  });
+  
+  ocrBtn?.addEventListener('click', async () => {
+    ocrBtn.disabled = true;
+    ocrBtn.textContent = 'Processing...';
+    try {
+      await processStatsScreenshots(boxScoreInput, statsInput);
+      toast('Stats extracted! Review and adjust if needed.', 'success');
+    } catch (err) {
+      toast(err.message || 'OCR processing failed', 'error');
+    } finally {
+      ocrBtn.disabled = false;
+      ocrBtn.textContent = 'Process Screenshots';
+    }
+  });
+  
+  $('portal-submit-no-stats-btn')?.addEventListener('click', async () => {
+    const btn = $('portal-submit-no-stats-btn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Submitting…';
+    }
+    try {
+      await submitPortalScorePayload({ gameId: game.id, homeScore, awayScore, ot });
+      hideModal();
+    } catch {
+      toast('Could not submit score', 'error');
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Submit Without Stats';
+      }
+    }
+  });
+}
+
+function collectPlayerStats() {
+  const stats = [];
+  document.querySelectorAll('[data-player-id]').forEach(row => {
+    const playerId = row.dataset.playerId;
+    const team = row.dataset.team;
+    const position = row.dataset.position;
+    
+    if (position === 'goalie') {
+      // Goalie stats
+      const sa = parseInt(row.querySelector('.stat-sa')?.value, 10) || 0;
+      const sv = parseInt(row.querySelector('.stat-sv')?.value, 10) || 0;
+      const ga = parseInt(row.querySelector('.stat-ga')?.value, 10) || 0;
+      const so = row.querySelector('.stat-so')?.checked || false;
+      
+      // Only include goalies with non-zero stats
+      if (sa || sv || ga) {
+        const svp = sa > 0 ? (sv / sa) : 0;
+        stats.push({
+          playerId,
+          teamCode: team,
+          position: 'G',
+          shotsAgainst: sa,
+          saves: sv,
+          goalsAgainst: ga,
+          savePercentage: svp,
+          shutout: so,
+          timeOnIce: 0
+        });
+      }
+    } else {
+      // Skater stats
+      const g = parseInt(row.querySelector('.stat-g')?.value, 10) || 0;
+      const a = parseInt(row.querySelector('.stat-a')?.value, 10) || 0;
+      const pm = parseInt(row.querySelector('.stat-pm')?.value, 10) || 0;
+      const pim = parseInt(row.querySelector('.stat-pim')?.value, 10) || 0;
+      
+      // Only include players with non-zero stats
+      if (g || a || pm || pim) {
+        stats.push({
+          playerId,
+          teamCode: team,
+          position: 'skater',
+          goals: g,
+          assists: a,
+          points: g + a,
+          plusMinus: pm,
+          pim,
+          shots: 0,
+          hits: 0,
+          blockedShots: 0,
+          faceoffWins: 0,
+          faceoffLosses: 0,
+          timeOnIce: 0
+        });
+      }
+    }
+  });
+  return stats;
+}
+
+function validatePlayerStats(playerStats, homeTeam, awayTeam, homeScore, awayScore) {
+  if (!playerStats || playerStats.length === 0) {
+    return { valid: true }; // No stats to validate
+  }
+  
+  const skaters = playerStats.filter(p => p.position !== 'G');
+  const goalies = playerStats.filter(p => p.position === 'G');
+  
+  // Validate skater goals match the score
+  const homeGoals = skaters.filter(p => p.teamCode === homeTeam).reduce((sum, p) => sum + (p.goals || 0), 0);
+  const awayGoals = skaters.filter(p => p.teamCode === awayTeam).reduce((sum, p) => sum + (p.goals || 0), 0);
+  
+  if (homeGoals !== homeScore) {
+    return {
+      valid: false,
+      error: `${homeTeam} player goals (${homeGoals}) don't match final score (${homeScore})`
+    };
+  }
+  
+  if (awayGoals !== awayScore) {
+    return {
+      valid: false,
+      error: `${awayTeam} player goals (${awayGoals}) don't match final score (${awayScore})`
+    };
+  }
+  
+  // Validate assists (max 2 per goal)
+  const totalGoals = homeGoals + awayGoals;
+  const totalAssists = skaters.reduce((sum, p) => sum + (p.assists || 0), 0);
+  
+  if (totalAssists > totalGoals * 2) {
+    return {
+      valid: false,
+      error: `Too many assists (${totalAssists}) for ${totalGoals} goals (max ${totalGoals * 2})`
+    };
+  }
+  
+  // Validate goalie stats
+  for (const goalie of goalies) {
+    const sa = goalie.shotsAgainst || 0;
+    const sv = goalie.saves || 0;
+    const ga = goalie.goalsAgainst || 0;
+    const opponentScore = goalie.teamCode === homeTeam ? awayScore : homeScore;
+    
+    // GA must match opponent's score
+    if (ga !== opponentScore) {
+      return {
+        valid: false,
+        error: `Goalie GA (${ga}) doesn't match opponent score (${opponentScore})`
+      };
+    }
+    
+    // Saves + GA must equal SA
+    if (sv + ga !== sa) {
+      return {
+        valid: false,
+        error: `Goalie stats invalid: Saves (${sv}) + GA (${ga}) ≠ SA (${sa})`
+      };
+    }
+    
+    // SA must be >= GA
+    if (sa < ga) {
+      return {
+        valid: false,
+        error: `Goalie SA (${sa}) cannot be less than GA (${ga})`
+      };
+    }
+  }
+  
+  return { valid: true };
+}
+
+async function processStatsScreenshots(boxScoreInput, statsInput) {
+  const toBase64 = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  
+  const boxScoreFile = boxScoreInput?.files?.[0];
+  const statsFile = statsInput?.files?.[0];
+  
+  if (!boxScoreFile && !statsFile) {
+    throw new Error('No screenshots selected');
+  }
+  
+  const boxScoreBase64 = boxScoreFile ? await toBase64(boxScoreFile) : null;
+  const statsBase64 = statsFile ? await toBase64(statsFile) : null;
+  
+  // TODO: Call OCR API endpoint
+  // For now, just show a message
+  throw new Error('OCR processing not yet implemented - please enter stats manually');
 }
 
 async function submitPortalScorePayload(payload) {
@@ -488,203 +1356,9 @@ async function handlePortalGamePick(gameId) {
   openPortalManualScoreModal(game);
 }
 
-async function showProposeTrade() {
-  if (_portalBusy) return;
-  _portalBusy = true;
-  
-  try {
-    const r = await _portalFetch('/api/v2/me/roster');
-    if (!r.ok) {
-      const body = await r.json().catch(() => ({}));
-      toast(body.error || 'Could not load roster', 'error');
-      return;
-    }
-    const data = await r.json();
-    
-    if (data.deadlinePassed) {
-      toast('Trade deadline has passed', 'error');
-      return;
-    }
-    
-    openTradeProposalModal(data);
-  } catch (e) {
-    toast('Failed to load trade data', 'error');
-  } finally {
-    _portalBusy = false;
-  }
-}
+// Trade proposal UI moved to portal-ui.js
 
-function openTradeProposalModal(data) {
-  const { myTeam, otherTeams } = data;
-  
-  const teamOptions = otherTeams.map(code => 
-    `<option value="${code}">${code}</option>`
-  ).join('');
-  
-  // Get my team's players from state
-  const myPlayers = state.players.filter(p => p.teamCode === myTeam).sort((a,b) => a.name.localeCompare(b.name));
-  const myPlayersList = myPlayers.length
-    ? myPlayers.map(p => `<label class="portal-checkbox-row"><input type="checkbox" class="trade-my-player" data-name="${p.name}"> ${p.name}</label>`).join('')
-    : '<div class="text-dim">No players on roster</div>';
-  
-  showModal('🔄 Propose Trade', `
-    <div class="form-row">
-      <label>Trade with</label>
-      <select id="trade-partner-select">
-        <option value="">— Select team —</option>
-        ${teamOptions}
-      </select>
-    </div>
-    
-    <div class="form-row">
-      <label>Your players (${myTeam})</label>
-      <div id="trade-my-players" style="max-height:200px;overflow-y:auto;border:1px solid #333;padding:8px;border-radius:4px">
-        ${myPlayersList}
-      </div>
-    </div>
-    
-    <div class="form-row">
-      <label>Their players</label>
-      <div id="trade-their-players" style="max-height:200px;overflow-y:auto;border:1px solid #333;padding:8px;border-radius:4px">
-        <div class="text-dim">Select a team first</div>
-      </div>
-    </div>
-    
-    <button id="modal-ok" class="btn btn-primary btn-block mt-12">Submit Trade Proposal</button>
-  `, async () => {
-    await submitTradeProposal();
-  });
-  
-  // Load partner roster when team selected
-  $('trade-partner-select')?.addEventListener('change', (e) => {
-    const partnerTeam = e.target.value;
-    if (!partnerTeam) {
-      $('trade-their-players').innerHTML = '<div class="text-dim">Select a team first</div>';
-      return;
-    }
-    
-    const partnerPlayers = state.players.filter(p => p.teamCode === partnerTeam).sort((a,b) => a.name.localeCompare(b.name));
-    const partnerPlayersList = partnerPlayers.length
-      ? partnerPlayers.map(p => `<label class="portal-checkbox-row"><input type="checkbox" class="trade-their-player" data-name="${p.name}"> ${p.name}</label>`).join('')
-      : '<div class="text-dim">No players on roster</div>';
-    
-    $('trade-their-players').innerHTML = partnerPlayersList;
-  });
-}
-
-async function showMyTrades() {
-  if (_portalBusy) return;
-  _portalBusy = true;
-  
-  try {
-    const data = await fetchPortalTrades({ preferCache: true });
-    
-    if (!data._ok) {
-      toast(data.error || 'Could not load trades', 'error');
-      return;
-    }
-    
-    const trades = data.trades || [];
-    const myTeam = data.myTeam || _portalSession?.teamCode;
-    
-    if (!myTeam) {
-      toast('Could not determine your team', 'error');
-      return;
-    }
-    
-    const tradesHtml = trades.length
-      ? trades.map(t => {
-          const payload = t.payload;
-          const isPending = t.status === 'pending';
-          const isApproved = t.status === 'approved';
-          const isRejected = t.status === 'rejected';
-          const statusIcon = isPending ? '⏳' : isApproved ? '✅' : '❌';
-          const statusText = isPending ? 'Pending' : isApproved ? 'Approved' : 'Rejected';
-          const statusColor = isPending ? '#f39c12' : isApproved ? '#27ae60' : '#e74c3c';
-          
-          const iProposed = payload.fromTeam === myTeam;
-          const otherTeam = iProposed ? payload.toTeam : payload.fromTeam;
-          const mySends = iProposed ? payload.playersSent : payload.playersReceived;
-          const myReceives = iProposed ? payload.playersReceived : payload.playersSent;
-          
-          const sendsStr = mySends && mySends.length ? mySends.join(', ') : '—';
-          const receivesStr = myReceives && myReceives.length ? myReceives.join(', ') : '—';
-          
-          return `
-            <div class="portal-trade-card" style="border:1px solid #333;border-radius:8px;padding:12px;margin-bottom:12px">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-                <div style="font-weight:600">${myTeam} ⇌ ${otherTeam}</div>
-                <div style="color:${statusColor};font-size:12px;font-weight:600">${statusIcon} ${statusText}</div>
-              </div>
-              <div style="font-size:13px;color:#aaa;margin-bottom:4px">You send: ${sendsStr}</div>
-              <div style="font-size:13px;color:#aaa">You receive: ${receivesStr}</div>
-              <div style="font-size:11px;color:#666;margin-top:8px">${timeSince(new Date(t.submitted_at))}</div>
-            </div>
-          `;
-        }).join('')
-      : '<div style="text-align:center;padding:40px;color:#666">No trade proposals yet</div>';
-    
-    showModal('📋 My Trades', `
-      <div style="max-height:400px;overflow-y:auto">
-        ${tradesHtml}
-      </div>
-    `, null, true);
-    
-  } catch (e) {
-    console.error('showMyTrades error:', e);
-    toast('Failed to load trades: ' + e.message, 'error');
-  } finally {
-    _portalTradesBadgeAt = 0;
-    _portalBusy = false;
-  }
-}
-
-async function submitTradeProposal() {
-  const partnerTeam = $('trade-partner-select')?.value;
-  if (!partnerTeam) {
-    toast('Select a trade partner', 'error');
-    return;
-  }
-  
-  const myPlayers = Array.from(document.querySelectorAll('.trade-my-player:checked')).map(cb => cb.dataset.name);
-  const theirPlayers = Array.from(document.querySelectorAll('.trade-their-player:checked')).map(cb => cb.dataset.name);
-  
-  if (!myPlayers.length && !theirPlayers.length) {
-    toast('Select at least one player', 'error');
-    return;
-  }
-  
-  const btn = $('modal-ok');
-  if (btn) btn.disabled = true;
-  
-  try {
-    const r = await _portalFetch('/api/v2/me/propose-trade', {
-      method: 'POST',
-      body: JSON.stringify({
-        otherTeam: partnerTeam,
-        playersSent: myPlayers,
-        playersReceived: theirPlayers,
-      }),
-    });
-    
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      toast(body.error || 'Could not submit trade', 'error');
-      if (btn) btn.disabled = false;
-      return;
-    }
-    
-    hideModal();
-    _portalTradesBadgeAt = 0;
-    clearCachedPortalTrades();
-    clearInflightPortalTrades();
-    updatePortalTradesBadge();
-    toast('Trade proposal submitted!', 'success');
-  } catch (e) {
-    toast('Failed to submit trade', 'error');
-    if (btn) btn.disabled = false;
-  }
-}
+// Trade display and submission moved to portal-ui.js
 
 function portalCardHTML() {
   if (!_portalSession?.user) {
@@ -703,6 +1377,7 @@ function portalCardHTML() {
   const avatar = portalAvatar();
   const managerNameText = _portalSession?.manager?.name || 'Not linked yet';
   const teamCode = _portalSession?.teamCode || '—';
+  const teamName = teamDisplayName(teamCode);
   if (!_portalSession.linked) {
     const managerOptions = _portalLinkOptions.length
       ? '<option value="">— Select your manager —</option>' + _portalLinkOptions.map(m => `<option value="${m.id}">${m.teamCode ? `${m.teamCode} · ` : ''}${m.name}</option>`).join('')
@@ -742,43 +1417,71 @@ function portalCardHTML() {
   }
   const standings = calcStandings();
   const teamSt = standings.find(s => s.teamCode === teamCode);
-  const record = teamSt ? `${teamSt.w}-${teamSt.l}${teamSt.ot ? '-' + teamSt.ot : ''}` : '—';
-  const teamLogo = teamCode ? teamLogoLg(teamCode, 48) : '';
+  const recordPlain = teamSt ? `${teamSt.w}-${teamSt.l}${teamSt.ot ? '-' + teamSt.ot : ''}` : '—';
+  const teamRecords = Object.fromEntries(standings.map(s => [s.teamCode, `(${s.w}-${s.l}${s.ot ? '-' + s.ot : ''})`]));
+  const teamLogo = teamCode ? teamLogoLg(teamCode, 96) : '';
   const gamesHtml = _portalGames.length
-    ? _portalGames.slice(0, 6).map(g => `
+    ? `
+      ${_portalGames.slice(0, 6).map(g => {
+        const homeName = teamDisplayName(g.homeTeam);
+        const awayName = teamDisplayName(g.awayTeam);
+        const homeManager = g.homeManagerName || 'TBD';
+        const awayManager = g.awayManagerName || 'TBD';
+        const homeRecord = teamRecords[g.homeTeam] || '—';
+        const awayRecord = teamRecords[g.awayTeam] || '—';
+        return `
       <button class="portal-game-card" data-game-id="${g.id}">
         <div class="portal-game-top">
           <span class="portal-game-week">${portalGameLabel(g)}</span>
-          <span class="portal-game-action">Submit</span>
+          <span class="portal-game-action">Tap to submit</span>
         </div>
-        <div class="portal-game-matchup">${g.homeTeam} vs ${g.awayTeam}</div>
-        <div class="portal-game-sub">${g.homeManagerName || '—'} vs ${g.awayManagerName || '—'}</div>
-      </button>`).join('')
+        <div class="portal-game-matchup">
+          <div class="portal-matchup-team portal-matchup-home">
+            <div class="portal-matchup-logo">${teamLogoLg(g.homeTeam, 56)}</div>
+            <div class="portal-matchup-text">
+              <div class="portal-matchup-name">${homeName}</div>
+              <div class="portal-matchup-record">${homeRecord}</div>
+              <div class="portal-matchup-mgr">${homeManager}</div>
+            </div>
+          </div>
+          <div class="portal-matchup-center">
+            <span class="portal-matchup-vs">VS</span>
+            <span class="portal-matchup-pill">${portalGameLabel(g)}</span>
+          </div>
+          <div class="portal-matchup-team portal-matchup-away">
+            <div class="portal-matchup-text portal-matchup-text-right">
+              <div class="portal-matchup-name">${awayName}</div>
+              <div class="portal-matchup-record">${awayRecord}</div>
+              <div class="portal-matchup-mgr">${awayManager}</div>
+            </div>
+            <div class="portal-matchup-logo">${teamLogoLg(g.awayTeam, 56)}</div>
+          </div>
+        </div>
+      </button>`;
+      }).join('')}
+    `
     : '<div class="empty-state"><span class="empty-icon">✅</span>No eligible games to submit right now</div>';
   return `
-    <div class="panel portal-panel">
+    <div class="panel portal-panel portal-panel-live">
       <div class="conf-header">
         <span class="conf-title">📱 My Score Portal</span>
-        <span class="conf-sub">Optimized for quick mobile submissions</span>
+        <span class="conf-sub">Arena-style mobile score hub</span>
       </div>
       <div class="panel-body portal-panel-body">
         <div class="portal-user-row">
           ${avatar ? `<img src="${avatar}" alt="" class="portal-avatar">` : '<div class="portal-avatar portal-avatar-fallback">D</div>'}
           <div class="portal-user-meta">
-            <div class="portal-user-name">${portalDisplayName()}</div>
-            <div class="portal-user-sub">${managerNameText} · ${teamCode}</div>
+            <div class="portal-user-kicker">Manager</div>
+            <div class="portal-user-name portal-user-name-strong">${managerNameText}</div>
+            <div class="portal-user-sub">${portalDisplayName()}</div>
           </div>
           <button class="btn btn-ghost btn-sm" id="portal-logout-btn">Sign Out</button>
         </div>
         <div class="portal-team-banner">
           <div class="portal-team-logo">${teamLogo}</div>
           <div class="portal-team-info">
-            <div class="portal-team-code">${teamCode}</div>
-            <div class="portal-team-record">${record}</div>
-          </div>
-          <div class="portal-team-stats">
-            <div class="portal-mini-stat"><span class="portal-mini-stat-value">${_portalGames.length}</span><span class="portal-mini-stat-label">Eligible</span></div>
-            <div class="portal-mini-stat"><span class="portal-mini-stat-value">${_portalSession.currentWeek || '—'}</span><span class="portal-mini-stat-label">Week</span></div>
+            <div class="portal-team-name">${teamName}</div>
+            <div class="portal-team-subline">${recordPlain}</div>
           </div>
         </div>
         <div class="portal-games-stack">${gamesHtml}</div>
@@ -793,28 +1496,7 @@ function portalCardHTML() {
     </div>`;
 }
 
-async function updatePortalTradesBadge() {
-  if (!_portalSession?.linked) return;
-  if (Date.now() - _portalTradesBadgeAt < 15000) return;
-  try {
-    const data = await fetchPortalTrades({ preferCache: true });
-    if (data._ok && data.trades) {
-      _portalTradesBadgeAt = Date.now();
-      const pendingCount = data.trades.filter(t => t.status === 'pending').length;
-      const badge = $('portal-trades-badge');
-      if (badge) {
-        if (pendingCount > 0) {
-          badge.textContent = pendingCount;
-          badge.style.display = 'inline-block';
-        } else {
-          badge.style.display = 'none';
-        }
-      }
-    }
-  } catch (e) {
-    // Silently fail
-  }
-}
+// updatePortalTradesBadge moved to portal-ui.js
 
 function bindPortalDashboardActions() {
   $('portal-login-btn')?.addEventListener('click', () => startPortalLogin());
@@ -894,6 +1576,7 @@ async function loadState() {
 function saveState() {
   state.sysDataFile = normalizeSysDataFile(state.sysDataFile);
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
+  _lastSelfSaveAt = Date.now();  // suppress SSE echo refresh
   if (_apiAvailable) {
     _apiFetch('/api/state', { method: 'POST', body: JSON.stringify(state) })
       .catch(() => {});  // fire-and-forget; localStorage is the immediate fallback
@@ -963,12 +1646,36 @@ function showModal(title, bodyHTML, onOk) {
   }
 }
 
-function hideModal() { $('modal-overlay').classList.add('hidden'); $('modal-box')?.classList.remove('modal-wide'); }
+function hideModal() {
+  $('modal-overlay').classList.add('hidden');
+  $('modal-box')?.classList.remove('modal-wide');
+  // If a live update arrived while the modal was open, apply it now
+  if (typeof _pendingLiveReload !== 'undefined' && _pendingLiveReload) {
+    _pendingLiveReload = false;
+    // Give the in-flight save a moment to hit the DB first
+    setTimeout(() => { try { _liveReloadState(); } catch {} }, 800);
+  }
+}
 
 function teamLogoUrl(code) {
   if (!code) return '';
   const apiCode = NHL_API_CODE_MAP[code] || code;
   return `https://assets.nhle.com/logos/nhl/svg/${apiCode}_light.svg`;
+}
+
+function teamDisplayName(code) {
+  const team = NHL_TEAMS.find(t => t.code === code);
+  return team ? team.name : (code || '—');
+}
+
+function hexToRgbTriplet(hex) {
+  const match = String(hex || '').trim().match(/^#?([a-f\d]{6})$/i);
+  if (!match) return '200, 168, 78';
+  const int = parseInt(match[1], 16);
+  const r = (int >> 16) & 255;
+  const g = (int >> 8) & 255;
+  const b = int & 255;
+  return `${r}, ${g}, ${b}`;
 }
 
 function teamBadge(code) {
@@ -1129,6 +1836,7 @@ function renderSection(section) {
     case 'draft':     renderDraft();     break;
     case 'schedule':  renderSchedule();  zbWarmCache(); break;
     case 'standings': renderStandings(); break;
+    case 'stats':     renderStats();     break;
     case 'playoffs':  renderPlayoffs();  break;
     case 'trades':    renderTrades();    break;
     case 'rules':     renderRules();     break;
@@ -1341,24 +2049,43 @@ function renderDashboard() {
 
   const fmtTradeName = p => resolvePlayerName(p, '#');
 
-  // Hottest / coldest — L10, min 5 games to qualify, ties both shown (max 3)
+  // Hottest / coldest — prioritize active streaks, then L10 record
+  // Hottest: longest active win streak (W only, not OTL), then best L10 record
+  // Coldest: longest active loss streak (L only), then worst L10 record
   let hotTeams = [], coldTeams = [];
   if (standings.length >= 4) {
     const withL10 = standings
       .map(t => ({ ...t, l10: l5Record(t.teamCode, 10) }))
       .filter(t => t.l10.games >= 5);
     if (withL10.length >= 2) {
-      withL10.sort((a, b) => b.l10.pts - a.l10.pts || b.l10.w - a.l10.w);
-      const topPts = withL10[0].l10.pts;
-      const topW   = withL10[0].l10.w;
-      hotTeams = withL10.filter(t => t.l10.pts === topPts && t.l10.w === topW).slice(0, 3);
-      withL10.sort((a, b) => a.l10.pts - b.l10.pts || a.l10.w - b.l10.w);
-      const botPts = withL10[0].l10.pts;
-      const botW   = withL10[0].l10.w;
-      coldTeams = withL10
-        .filter(t => t.l10.pts === botPts && t.l10.w === botW)
-        .filter(t => !hotTeams.find(h => h.teamCode === t.teamCode))
-        .slice(0, 3);
+      // Hottest: longest active win streak (only show THE hottest, not ties)
+      const hotCandidates = withL10.filter(t => t.l10.streakType === 'W');
+      if (hotCandidates.length > 0) {
+        hotCandidates.sort((a, b) => {
+          // First by win streak length (longer is hotter)
+          if (b.l10.streak !== a.l10.streak) return b.l10.streak - a.l10.streak;
+          // Then by L10 points
+          if (b.l10.pts !== a.l10.pts) return b.l10.pts - a.l10.pts;
+          // Then by L10 wins
+          return b.l10.w - a.l10.w;
+        });
+        // Only show the single hottest team (no ties)
+        hotTeams = [hotCandidates[0]];
+      }
+      // Coldest: longest active loss streak (only show THE coldest, not ties)
+      const coldCandidates = withL10.filter(t => t.l10.streakType === 'L');
+      if (coldCandidates.length > 0) {
+        coldCandidates.sort((a, b) => {
+          // First by loss streak length (longer is colder)
+          if (b.l10.streak !== a.l10.streak) return b.l10.streak - a.l10.streak;
+          // Then by L10 points (fewer is colder)
+          if (a.l10.pts !== b.l10.pts) return a.l10.pts - b.l10.pts;
+          // Then by L10 wins (fewer is colder)
+          return a.l10.w - b.l10.w;
+        });
+        // Only show the single coldest team (no ties)
+        coldTeams = [coldCandidates[0]];
+      }
     }
   }
 
@@ -1473,6 +2200,7 @@ function renderDashboard() {
     <div class="portal-dashboard-slot">
       ${portalCardHTML()}
     </div>
+
 
     <!-- PANELS -->
     <div class="dash-panels">
@@ -1755,9 +2483,9 @@ function showEditRoster(teamCode) {
   `, () => {
     let moved = 0;
     document.querySelectorAll('.roster-move-sel').forEach(sel => {
-      const pid = +sel.dataset.pid;
+      const pid = sel.dataset.pid;
       const dest = sel.value;
-      const p = state.players.find(x => x.id === pid);
+      const p = state.players.find(x => String(x.id) === String(pid));
       if (p && dest !== teamCode) { p.teamCode = dest || ''; moved++; }
     });
     saveState();
@@ -1873,10 +2601,13 @@ function renderRosterTable(players, q, teamFilter) {
 // Assign single player to team
 document.addEventListener('click', e => {
   if (!e.target.classList.contains('assign-player-btn')) return;
+  e.stopPropagation();
+  e.preventDefault();
+  console.log('[Assign] Button clicked, pid=', e.target.dataset.pid);
   if (!isAdmin) { toast('Admin access required', 'error'); return; }
-  const pid = +e.target.dataset.pid;
-  const p = state.players.find(x => x.id === pid);
-  if (!p) return;
+  const pid = e.target.dataset.pid;
+  const p = state.players.find(x => String(x.id) === String(pid));
+  if (!p) { console.warn('[Assign] Player not found for pid', pid, 'sample ids:', state.players.slice(0,3).map(x=>x.id)); return; }
   showModal('Assign Player Team', `
     <div class="form-row">
       <label>${p.name}</label>
@@ -1890,7 +2621,7 @@ document.addEventListener('click', e => {
     p.teamCode = $('assign-team-select').value;
     saveState();
     hideModal();
-    renderSection(currentSection);
+    renderPlayers();
     toast('Assignment saved', 'success');
   });
 });
@@ -1898,10 +2629,13 @@ document.addEventListener('click', e => {
 // Edit player OVR / PLT
 document.addEventListener('click', e => {
   if (!e.target.classList.contains('edit-rating-btn')) return;
+  e.stopPropagation();
+  e.preventDefault();
+  console.log('[Edit] Button clicked, pid=', e.target.dataset.pid);
   if (!isAdmin) { toast('Admin access required', 'error'); return; }
-  const pid = +e.target.dataset.pid;
-  const p = state.players.find(x => x.id === pid);
-  if (!p) return;
+  const pid = e.target.dataset.pid;
+  const p = state.players.find(x => String(x.id) === String(pid));
+  if (!p) { console.warn('[Edit] Player not found for pid', pid); return; }
   const PLT_CODES = ['TWF','PWF','SNP','ENF','GRN','HKY','SNW','PLY','TWD','OFD','DFD','PWD','EPC','GKP','HYB','BUT'];
   showModal(`Edit Rating — ${p.name}`, `
     <div class="form-row">
@@ -1918,15 +2652,15 @@ document.addEventListener('click', e => {
     </div>
     <button id="modal-ok" class="btn btn-primary btn-block mt-12">Save</button>
   `, () => {
-    const ovrVal = parseInt($('er-ovr').value);
-    const pltSel = $('er-plt').value;
-    const pltCustom = $('er-plt-custom').value.toUpperCase().trim();
-    if (ovrVal >= 60 && ovrVal <= 99) p.ovr = ovrVal;
-    p.plt = pltCustom || pltSel || p.plt || '';
+    const ovr = parseInt($('er-ovr').value) || null;
+    const pltCustom = $('er-plt-custom')?.value.trim().toUpperCase();
+    const plt = pltCustom || $('er-plt').value || null;
+    p.ovr = ovr;
+    p.plt = plt;
     saveState();
     hideModal();
-    renderSection(currentSection);
-    toast(`${p.name} updated`, 'success');
+    renderPlayers();
+    toast('Rating updated', 'success');
   });
 });
 
@@ -1941,12 +2675,25 @@ function renderPlayers() {
   el_.innerHTML = `
     <div class="page-header"><h2>Players</h2></div>
 
-    <div class="filter-bar mb-12">
-      <input type="text" id="pl-search" placeholder="Search by name...">
-      <select id="pl-team-filter">
+    <div class="flex gap-10 mb-12" style="flex-wrap:wrap">
+      <input type="text" id="pl-search" placeholder="Search by name..." style="flex:1;min-width:200px">
+      <select id="pl-team-filter" style="min-width:180px">
         <option value="">All Teams</option>
         ${NHL_TEAMS.filter(t=>t.code!=='UTI').map(t => `<option value="${t.code}">${t.code} – ${t.name}</option>`).join('')}
         <option value="_none">Unassigned</option>
+      </select>
+      <select id="pl-pos-filter" style="min-width:120px">
+        <option value="">All Positions</option>
+        <option value="C">C</option>
+        <option value="LW">LW</option>
+        <option value="RW">RW</option>
+        <option value="D">D</option>
+        <option value="G">G</option>
+      </select>
+      <select id="pl-attr-filter" style="min-width:150px">
+        <option value="">Show All Players</option>
+        <option value="has-attrs">★ With Attributes</option>
+        <option value="no-attrs">No Attributes</option>
       </select>
     </div>
 
@@ -1955,15 +2702,19 @@ function renderPlayers() {
 
   $('pl-search').addEventListener('input', refreshPlayersTable);
   $('pl-team-filter').addEventListener('change', refreshPlayersTable);
+  $('pl-pos-filter').addEventListener('change', refreshPlayersTable);
+  $('pl-attr-filter').addEventListener('change', refreshPlayersTable);
   refreshPlayersTable();
 }
 
 function refreshPlayersTable() {
   const q  = $('pl-search')?.value.toLowerCase() || '';
   const tf = $('pl-team-filter')?.value || '';
+  const pf = $('pl-pos-filter')?.value || '';
+  const af = $('pl-attr-filter')?.value || '';
   const wrap = $('players-table-wrap');
   if (!wrap) return;
-  wrap.innerHTML = renderPlayersTable(q, tf, _plSort.by, _plSort.dir);
+  wrap.innerHTML = renderPlayersTable(q, tf, pf, af, _plSort.by, _plSort.dir);
 
   // Column header click-to-sort
   wrap.querySelectorAll('th[data-sort]').forEach(th => {
@@ -1972,15 +2723,175 @@ function refreshPlayersTable() {
       if (_plSort.by === col) {
         _plSort.dir = _plSort.dir === 'asc' ? 'desc' : 'asc';
       } else {
-        _plSort.by  = col;
-        _plSort.dir = col === 'name' || col === 'pos' || col === 'plt' || col === 'team' ? 'asc' : 'desc';
+        _plSort.by = col;
+        _plSort.dir = 'desc';
       }
-      refreshPlayersTable();
+      renderPlayers();
+    });
+  });
+  
+  // Player row click to show card
+  wrap.querySelectorAll('.player-row-clickable').forEach(row => {
+    row.addEventListener('click', (e) => {
+      // Don't open card if clicking buttons or action cell
+      if (e.target.tagName === 'BUTTON') return;
+      if (e.target.closest('.action-cell')) return;
+      if (e.target.classList.contains('assign-player-btn')) return;
+      if (e.target.classList.contains('edit-rating-btn')) return;
+      
+      const playerId = row.dataset.playerId;
+      const player = state.players.find(p => String(p.id) === String(playerId));
+      if (player) {
+        showPlayerCard(player);
+      }
     });
   });
 }
 
-function renderPlayersTable(q, teamFilter, sortBy, sortDir = 'desc') {
+function showPlayerCard(player) {
+  const attrs = player.attributes || {};
+  const hasAttrs = !!player.attributes;
+  const seasonStats = player.seasonStats || {};
+  
+  // Attribute categories
+  const skating = hasAttrs ? [
+    { label: 'Speed', value: attrs.speed },
+    { label: 'Acceleration', value: attrs.acceleration },
+    { label: 'Agility', value: attrs.agility },
+    { label: 'Balance', value: attrs.balance },
+  ] : [];
+  
+  const shooting = hasAttrs ? [
+    { label: 'Wrist Shot Power', value: attrs.wrist_shot_power },
+    { label: 'Wrist Shot Accuracy', value: attrs.wrist_shot_accuracy },
+    { label: 'Slap Shot Power', value: attrs.slap_shot_power },
+    { label: 'Slap Shot Accuracy', value: attrs.slap_shot_accuracy },
+  ] : [];
+  
+  const skills = hasAttrs ? [
+    { label: 'Passing', value: attrs.passing },
+    { label: 'Puck Control', value: attrs.puck_control },
+    { label: 'Deking', value: attrs.deking },
+    { label: 'Hand-Eye', value: attrs.hand_eye },
+  ] : [];
+  
+  const defense = hasAttrs ? [
+    { label: 'Defensive Awareness', value: attrs.defensive_awareness },
+    { label: 'Stick Checking', value: attrs.stick_checking },
+    { label: 'Shot Blocking', value: attrs.shot_blocking },
+  ] : [];
+  
+  const physical = hasAttrs ? [
+    { label: 'Strength', value: attrs.strength },
+    { label: 'Body Checking', value: attrs.body_checking },
+    { label: 'Aggression', value: attrs.aggression },
+    { label: 'Durability', value: attrs.durability },
+  ] : [];
+  
+  const mental = hasAttrs ? [
+    { label: 'Offensive Awareness', value: attrs.offensive_awareness },
+    { label: 'Discipline', value: attrs.discipline },
+    { label: 'Poise', value: attrs.poise },
+  ] : [];
+  
+  const attrSection = (title, items) => {
+    if (!items.length) return '';
+    return `
+      <div class="player-card-attr-section">
+        <h4>${title}</h4>
+        ${items.map(item => `
+          <div class="player-card-attr-row">
+            <span>${item.label}</span>
+            <span class="player-card-attr-value">${item.value}</span>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  };
+  
+  showModal(`${player.name}`, `
+    <div class="player-card">
+      <div class="player-card-header">
+        ${player.headshot ? `<img src="${player.headshot}" class="player-card-headshot" onerror="this.style.display='none'">` : ''}
+        <div class="player-card-info">
+          <div class="player-card-number">${player.number ? `#${player.number}` : ''}</div>
+          <div class="player-card-position">${player.position || '—'}</div>
+          <div class="player-card-team">${player.teamCode ? teamBadge(player.teamCode) : '<span class="text-dim">Free Agent</span>'}</div>
+          <div class="player-card-manager text-sm text-muted">${teamOwnerName(player.teamCode)}</div>
+        </div>
+        <div class="player-card-ratings">
+          <div class="player-card-ovr">
+            <div class="text-xs text-muted">OVERALL</div>
+            <div class="text-2xl font-bold">${player.ovr || player.overall || '—'}</div>
+            ${player.sysdataOverall && player.sysdataOverall !== player.ovr ? `<div class="text-xs text-dim">(SYS-DATA: ${player.sysdataOverall})</div>` : ''}
+          </div>
+          ${player.plt ? `
+            <div class="player-card-plt">
+              <div class="text-xs text-muted">POTENTIAL</div>
+              <div class="text-xl font-bold">${player.plt}</div>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+      
+      ${hasAttrs ? `
+        <div class="player-card-attributes">
+          <div class="player-card-section-title">
+            <h3>Attributes</h3>
+            <span class="text-xs text-muted">From SYS-DATA</span>
+          </div>
+          <div class="player-card-attr-grid">
+            ${attrSection('Skating', skating)}
+            ${attrSection('Shooting', shooting)}
+            ${attrSection('Skills', skills)}
+            ${attrSection('Defense', defense)}
+            ${attrSection('Physical', physical)}
+            ${attrSection('Mental', mental)}
+          </div>
+        </div>
+      ` : `
+        <div class="player-card-no-attrs">
+          <p class="text-dim">No attribute data available</p>
+          <p class="text-xs text-muted mt-4">Upload SYS-DATA file to see player attributes</p>
+        </div>
+      `}
+      
+      ${seasonStats.gamesPlayed ? `
+        <div class="player-card-season-stats">
+          <h3>Season Stats</h3>
+          <div class="player-card-stats-grid">
+            <div class="stat-item">
+              <div class="stat-label">GP</div>
+              <div class="stat-value">${seasonStats.gamesPlayed}</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">G</div>
+              <div class="stat-value">${seasonStats.goals || 0}</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">A</div>
+              <div class="stat-value">${seasonStats.assists || 0}</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">PTS</div>
+              <div class="stat-value font-bold">${seasonStats.points || 0}</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">+/-</div>
+              <div class="stat-value">${seasonStats.plusMinus > 0 ? '+' : ''}${seasonStats.plusMinus || 0}</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">PIM</div>
+              <div class="stat-value">${seasonStats.pim || 0}</div>
+            </div>
+          </div>
+        </div>
+      ` : ''}
+    </div>
+  `);
+}
+
+function renderPlayersTable(q, teamFilter, posFilter, attrFilter, sortBy, sortDir = 'desc') {
   if (!state.players.length) {
     return `<div class="empty-state">No players loaded.</div>`;
   }
@@ -1989,6 +2900,9 @@ function renderPlayersTable(q, teamFilter, sortBy, sortDir = 'desc') {
   if (q) list = list.filter(p => p.name.toLowerCase().includes(q));
   if (teamFilter === '_none') list = list.filter(p => !p.teamCode);
   else if (teamFilter) list = list.filter(p => p.teamCode === teamFilter);
+  if (posFilter) list = list.filter(p => p.position === posFilter);
+  if (attrFilter === 'has-attrs') list = list.filter(p => p.attributes);
+  else if (attrFilter === 'no-attrs') list = list.filter(p => !p.attributes);
 
   const asc = sortDir === 'asc';
   if (sortBy === 'name') list.sort((a, b) => asc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name));
@@ -1996,6 +2910,18 @@ function renderPlayersTable(q, teamFilter, sortBy, sortDir = 'desc') {
   else if (sortBy === 'team') list.sort((a, b) => asc ? (a.teamCode||'ZZZ').localeCompare(b.teamCode||'ZZZ') : (b.teamCode||'ZZZ').localeCompare(a.teamCode||'ZZZ'));
   else if (sortBy === 'ovr') list.sort((a, b) => asc ? (a.ovr||0)-(b.ovr||0) : (b.ovr||0)-(a.ovr||0));
   else if (sortBy === 'plt') list.sort((a, b) => asc ? (a.plt||'ZZZ').localeCompare(b.plt||'ZZZ') : (b.plt||'ZZZ').localeCompare(a.plt||'ZZZ'));
+  // Attribute sorting
+  else if (sortBy === 'speed') list.sort((a, b) => asc ? (a.attributes?.speed||0)-(b.attributes?.speed||0) : (b.attributes?.speed||0)-(a.attributes?.speed||0));
+  else if (sortBy === 'shooting') list.sort((a, b) => {
+    const aShoot = a.attributes ? (a.attributes.wrist_shot_power + a.attributes.wrist_shot_accuracy) / 2 : 0;
+    const bShoot = b.attributes ? (b.attributes.wrist_shot_power + b.attributes.wrist_shot_accuracy) / 2 : 0;
+    return asc ? aShoot - bShoot : bShoot - aShoot;
+  });
+  else if (sortBy === 'hands') list.sort((a, b) => {
+    const aHands = a.attributes ? (a.attributes.puck_control + a.attributes.passing) / 2 : 0;
+    const bHands = b.attributes ? (b.attributes.puck_control + b.attributes.passing) / 2 : 0;
+    return asc ? aHands - bHands : bHands - aHands;
+  });
 
   if (!list.length) return `<div class="empty-state">No players match filter</div>`;
 
@@ -2006,7 +2932,7 @@ function renderPlayersTable(q, teamFilter, sortBy, sortDir = 'desc') {
   const thCls = (col) => `style="cursor:pointer;user-select:none${_plSort.by===col?';color:#fff':''}"`;
 
   return `
-    <div class="text-xs text-muted mb-8">${list.length} player${list.length !== 1 ? 's' : ''}</div>
+    <div class="text-xs text-muted mb-8">${list.length} player${list.length !== 1 ? 's' : ''} · ${list.filter(p=>p.attributes).length} with attributes</div>
     <div class="table-wrap">
       <table>
         <thead><tr>
@@ -2014,25 +2940,32 @@ function renderPlayersTable(q, teamFilter, sortBy, sortDir = 'desc') {
           <th data-sort="pos"  ${thCls('pos')}>Pos${arrow('pos')}</th>
           <th data-sort="ovr"  ${thCls('ovr')}>OVR${arrow('ovr')}</th>
           <th data-sort="plt"  ${thCls('plt')}>PLT${arrow('plt')}</th>
+          <th data-sort="speed" ${thCls('speed')} title="Speed">SPD${arrow('speed')}</th>
+          <th data-sort="shooting" ${thCls('shooting')} title="Shooting (WSP+WSA avg)">SHT${arrow('shooting')}</th>
+          <th data-sort="hands" ${thCls('hands')} title="Hands (PC+PAS avg)">HND${arrow('hands')}</th>
           <th data-sort="team" ${thCls('team')}>Team${arrow('team')}</th>
           <th>Manager</th>
           ${isAdmin ? '<th></th>' : ''}
         </tr></thead>
         <tbody>
           ${list.map(p => `
-            <tr>
+            <tr class="player-row-clickable" data-player-id="${p.id}" style="cursor:pointer">
               <td>
                 <span style="display:inline-flex;align-items:center;gap:8px">
                   ${p.headshot ? `<img src="${p.headshot}" class="player-headshot-sm" loading="lazy" onerror="this.style.display='none'">` : ''}
                   <span class="font-bold">${p.name}</span>${p.number ? `<span class="text-dim text-xs">#${p.number}</span>` : ''}
+                  ${p.attributes ? '<span class="text-xs" style="color:#c8a84e" title="Has SYS-DATA attributes">★</span>' : ''}
                 </span>
               </td>
               <td><span class="pos-badge pos-${p.position||''}">${p.position||'—'}</span></td>
               <td>${ovrBadge(p.ovr)}</td>
               <td>${pltBadge(p.plt)}</td>
+              <td>${p.attributes ? `<span class="attr-badge">${p.attributes.speed}</span>` : '<span class="text-dim">—</span>'}</td>
+              <td>${p.attributes ? `<span class="attr-badge">${Math.round((p.attributes.wrist_shot_power + p.attributes.wrist_shot_accuracy) / 2)}</span>` : '<span class="text-dim">—</span>'}</td>
+              <td>${p.attributes ? `<span class="attr-badge">${Math.round((p.attributes.puck_control + p.attributes.passing) / 2)}</span>` : '<span class="text-dim">—</span>'}</td>
               <td>${p.teamCode ? teamBadge(p.teamCode) : '<span class="text-dim">FA</span>'}</td>
               <td class="text-sm text-muted">${teamOwnerName(p.teamCode)}</td>
-              ${isAdmin ? `<td style="white-space:nowrap;display:flex;gap:4px;align-items:center"><button class="btn btn-ghost btn-sm assign-player-btn" data-pid="${p.id}">Assign</button><button class="btn btn-ghost btn-xs edit-rating-btn" data-pid="${p.id}" title="Edit OVR/PLT" style="font-size:.7rem;padding:2px 6px">✎</button></td>` : ''}
+              ${isAdmin ? `<td style="white-space:nowrap;display:flex;gap:4px;align-items:center" class="action-cell"><button class="btn btn-ghost btn-sm assign-player-btn" data-pid="${p.id}">Assign</button><button class="btn btn-ghost btn-xs edit-rating-btn" data-pid="${p.id}" title="Edit OVR/PLT" style="font-size:.7rem;padding:2px 6px">✎</button></td>` : ''}
             </tr>`).join('')}
         </tbody>
       </table>
@@ -2071,7 +3004,79 @@ function getDraftModuleContext() {
   };
 }
 
+let _draftViewMode = 'admin'; // 'admin' or 'player'
+
+function addDraftViewToggle() {
+  const container = $('section-draft');
+  if (!container) return;
+  
+  const isAdminPlayer = isAdmin && _portalSession?.linked && _portalSession?.manager;
+  console.log('[Draft Toggle] isAdmin:', isAdmin, '_portalSession:', _portalSession, 'isAdminPlayer:', isAdminPlayer);
+  
+  if (!isAdminPlayer) {
+    console.log('[Draft Toggle] Not showing toggle - not admin+player');
+    return;
+  }
+  
+  console.log('[Draft Toggle] Adding toggle buttons');
+  
+  // Remove old toggle if exists
+  const oldToggle = $('draft-view-toggle-container');
+  if (oldToggle) oldToggle.remove();
+  
+  // Add toggle button at top
+  const toggleHtml = `
+    <div id="draft-view-toggle-container" style="position:absolute;top:16px;right:16px;z-index:100;display:flex;gap:8px">
+      <button class="btn btn-sm ${_draftViewMode === 'admin' ? 'btn-primary' : 'btn-ghost'}" id="draft-view-admin">
+        👨‍💼 Admin View
+      </button>
+      <button class="btn btn-sm ${_draftViewMode === 'player' ? 'btn-primary' : 'btn-ghost'}" id="draft-view-player">
+        🏒 Player View
+      </button>
+    </div>
+  `;
+  
+  container.insertAdjacentHTML('afterbegin', toggleHtml);
+  
+  $('draft-view-admin')?.addEventListener('click', () => {
+    _draftViewMode = 'admin';
+    renderDraft();
+  });
+  
+  $('draft-view-player')?.addEventListener('click', () => {
+    _draftViewMode = 'player';
+    renderDraft();
+  });
+}
+
 function renderDraft() {
+  const container = $('section-draft');
+  if (!container) return;
+  
+  const isAdminPlayer = isAdmin && _portalSession?.linked && _portalSession?.manager;
+  
+  // Render based on mode
+  if (isAdminPlayer && _draftViewMode === 'player') {
+    // Admin viewing as player
+    renderPortalDraft();
+    addDraftViewToggle();
+    return;
+  }
+  
+  if (isAdmin && window.DraftModule?.renderDraft) {
+    // Admin view
+    window.DraftModule.renderDraft(getDraftModuleContext());
+    addDraftViewToggle();
+    return;
+  }
+  
+  if (_portalSession?.linked && _portalSession?.manager) {
+    // Regular player view
+    renderPortalDraft();
+    return;
+  }
+  
+  // Fallback to admin draft UI
   if (window.DraftModule?.renderDraft) {
     window.DraftModule.renderDraft(getDraftModuleContext());
   }
@@ -2686,7 +3691,9 @@ function renderScores() {
         const homeWin = +g.homeScore > +g.awayScore;
         const homeMgr = state.managers.find(m => m.id === state.teamOwners[g.homeTeam]);
         const awayMgr = state.managers.find(m => m.id === state.teamOwners[g.awayTeam]);
-        const hasStats = !!(homeMgr?.zamboniTag && awayMgr?.zamboniTag);
+        const hasZamboniStats = !!(homeMgr?.zamboniTag && awayMgr?.zamboniTag);
+        const hasPlayerStats = !!(g.playerStats && g.playerStats.length > 0);
+        const hasStats = hasZamboniStats || hasPlayerStats;
         return `
         <div class="sb-game ${hasStats ? 'sb-game-stats' : ''}" data-gid="${g.id}">
           <div class="sb-team ${homeWin ? 'sb-winner' : 'sb-loser'}">
@@ -2973,6 +3980,321 @@ function renderStandings() {
       renderStandings();
     });
   });
+}
+
+// ================================================================
+// 14. STATS (NHL.com style leaderboards)
+// ================================================================
+let _statsFilter = { category: 'skaters', stat: 'points', team: 'all' };
+
+function renderStats() {
+  const el_ = $('section-stats');
+  
+  // Get all player stats from games
+  const allPlayerStats = [];
+  state.games.forEach(g => {
+    if (g.playerStats && g.playerStats.length > 0) {
+      g.playerStats.forEach(ps => {
+        allPlayerStats.push({
+          ...ps,
+          gameId: g.id,
+          gameDate: g.postedAt || g.playedAt || g.date
+        });
+      });
+    }
+  });
+  
+  // Aggregate stats by player
+  const playerMap = {};
+  allPlayerStats.forEach(ps => {
+    const key = ps.playerId;
+    if (!playerMap[key]) {
+      playerMap[key] = {
+        playerId: ps.playerId,
+        playerName: ps.playerName,
+        teamCode: ps.teamCode,
+        position: ps.position,
+        gamesPlayed: 0,
+        goals: 0,
+        assists: 0,
+        points: 0,
+        pim: 0,
+        plusMinus: 0,
+        // Goalie stats
+        wins: 0,
+        losses: 0,
+        otLosses: 0,
+        shotsAgainst: 0,
+        saves: 0,
+        goalsAgainst: 0,
+        shutouts: 0
+      };
+    }
+    
+    const p = playerMap[key];
+    p.gamesPlayed++;
+    
+    if (ps.position === 'G') {
+      // Goalie stats
+      p.shotsAgainst += ps.shotsAgainst || 0;
+      p.saves += ps.saves || 0;
+      p.goalsAgainst += ps.goalsAgainst || 0;
+      if (ps.shutout) p.shutouts++;
+      
+      // Determine W/L
+      const game = state.games.find(g => g.id === ps.gameId);
+      if (game) {
+        const isHome = game.homeTeam === ps.teamCode;
+        const teamScore = isHome ? game.homeScore : game.awayScore;
+        const oppScore = isHome ? game.awayScore : game.homeScore;
+        if (teamScore > oppScore) p.wins++;
+        else if (game.ot) p.otLosses++;
+        else p.losses++;
+      }
+    } else {
+      // Skater stats
+      p.goals += ps.goals || 0;
+      p.assists += ps.assists || 0;
+      p.points += (ps.points || 0);
+      p.pim += ps.pim || 0;
+      p.plusMinus += ps.plusMinus || 0;
+    }
+  });
+  
+  const players = Object.values(playerMap);
+  const skaters = players.filter(p => p.position !== 'G');
+  const goalies = players.filter(p => p.position === 'G');
+  
+  // Calculate goalie averages
+  goalies.forEach(g => {
+    g.gaa = g.gamesPlayed > 0 ? (g.goalsAgainst / g.gamesPlayed).toFixed(2) : '0.00';
+    g.svPct = g.shotsAgainst > 0 ? (g.saves / g.shotsAgainst) : 0;
+    g.svPctDisplay = g.svPct.toFixed(3).replace('0.', '.');
+  });
+  
+  const teams = ['all', ...Object.keys(state.teamOwners).sort()];
+  
+  const isSkaters = _statsFilter.category === 'skaters';
+  const dataSet = isSkaters ? skaters : goalies;
+  
+  // Filter by team
+  const filtered = _statsFilter.team === 'all' 
+    ? dataSet 
+    : dataSet.filter(p => p.teamCode === _statsFilter.team);
+  
+  // Sort by selected stat
+  const sortKey = _statsFilter.stat;
+  filtered.sort((a, b) => {
+    const aVal = a[sortKey] || 0;
+    const bVal = b[sortKey] || 0;
+    if (sortKey === 'gaa') return aVal - bVal; // Lower is better
+    return bVal - aVal; // Higher is better
+  });
+  
+  const top50 = filtered.slice(0, 50);
+  
+  const teamFilter = teams.map(t => 
+    `<option value="${t}" ${_statsFilter.team === t ? 'selected' : ''}>${t === 'all' ? 'All Teams' : t}</option>`
+  ).join('');
+  
+  const skaterStats = [
+    { key: 'points', label: 'Points' },
+    { key: 'goals', label: 'Goals' },
+    { key: 'assists', label: 'Assists' },
+    { key: 'plusMinus', label: '+/-' },
+    { key: 'pim', label: 'PIM' }
+  ];
+  
+  const goalieStats = [
+    { key: 'wins', label: 'Wins' },
+    { key: 'gaa', label: 'GAA' },
+    { key: 'svPct', label: 'SV%' },
+    { key: 'shutouts', label: 'SO' }
+  ];
+  
+  const statButtons = (isSkaters ? skaterStats : goalieStats).map(s =>
+    `<button class="stat-filter-btn ${_statsFilter.stat === s.key ? 'active' : ''}" data-stat="${s.key}">${s.label}</button>`
+  ).join('');
+  
+  // Featured leaders (top 3)
+  const topLeaders = top50.slice(0, 3);
+  
+  el_.innerHTML = `
+    <div class="stats-hero">
+      <h1 class="stats-title">Statistics</h1>
+      <div class="stats-category-tabs">
+        <button class="stats-tab ${isSkaters ? 'active' : ''}" data-category="skaters">Skaters</button>
+        <button class="stats-tab ${!isSkaters ? 'active' : ''}" data-category="goalies">Goalies</button>
+      </div>
+    </div>
+    
+    <div class="stats-filters-bar">
+      <select id="stats-team-filter" class="stats-select">
+        ${teamFilter}
+      </select>
+      <div class="stats-stat-filters">
+        ${statButtons}
+      </div>
+    </div>
+    
+    ${topLeaders.length > 0 ? `
+      <div class="stats-leaders-section">
+        <h2 class="stats-section-title">${isSkaters ? 'Skaters' : 'Goalies'} ›</h2>
+        <div class="stats-leaders-grid">
+          ${topLeaders.map((p, i) => renderLeaderCard(p, i + 1, isSkaters)).join('')}
+        </div>
+      </div>
+    ` : ''}
+    
+    <div class="stats-table-section">
+      <div class="stats-table-header">
+        <h3>All Leaders</h3>
+      </div>
+      ${top50.length === 0 ? '<div class="empty-state"><span class="empty-icon">📊</span>No stats recorded yet</div>' : 
+        isSkaters ? renderSkatersTable(top50) : renderGoaliesTable(top50)}
+    </div>
+  `;
+  
+  // Event listeners
+  el_.querySelectorAll('.stats-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _statsFilter.category = btn.dataset.category;
+      _statsFilter.stat = btn.dataset.category === 'skaters' ? 'points' : 'wins';
+      renderStats();
+    });
+  });
+  
+  el_.querySelectorAll('.stat-filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _statsFilter.stat = btn.dataset.stat;
+      renderStats();
+    });
+  });
+  
+  $('stats-team-filter')?.addEventListener('change', (e) => {
+    _statsFilter.team = e.target.value;
+    renderStats();
+  });
+}
+
+function renderLeaderCard(player, rank, isSkater) {
+  const statLabel = isSkater ? 'POINTS' : 'GAA';
+  const statValue = isSkater ? player.points : player.gaa;
+  const bgColor = rank === 1 ? '#1e40af' : rank === 2 ? '#1e3a8a' : '#1e293b';
+  
+  // Get headshot from state.players
+  const fullPlayer = state.players.find(p => String(p.id) === String(player.playerId));
+  const headshot = fullPlayer?.headshot || '';
+  
+  return `
+    <div class="leader-card" style="background: ${bgColor}">
+      ${headshot ? `<img src="${headshot}" class="leader-headshot" loading="lazy" onerror="this.style.display='none'">` : ''}
+      <div class="leader-content">
+        <div class="leader-rank">T${rank}.</div>
+        <div class="leader-info">
+          <div class="leader-name">${player.playerName}</div>
+          <div class="leader-team">${player.teamCode} • ${player.position}</div>
+        </div>
+        <div class="leader-stat">
+          <div class="leader-stat-label">${statLabel}</div>
+          <div class="leader-stat-value">${statValue}</div>
+        </div>
+        ${isSkater ? `
+          <div class="leader-substats">
+            <span>${player.goals}G</span>
+            <span>${player.assists}A</span>
+            <span>${player.gamesPlayed}GP</span>
+          </div>
+        ` : `
+          <div class="leader-substats">
+            <span>${player.wins}W</span>
+            <span>${player.svPctDisplay} SV%</span>
+            <span>${player.shutouts}SO</span>
+          </div>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+function renderSkatersTable(players) {
+  return `
+    <table class="stats-table">
+      <thead>
+        <tr>
+          <th class="text-left">Rank</th>
+          <th class="text-left">Player</th>
+          <th class="text-left">Team</th>
+          <th>Pos</th>
+          <th>GP</th>
+          <th>G</th>
+          <th>A</th>
+          <th class="highlight">PTS</th>
+          <th>+/-</th>
+          <th>PIM</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${players.map((p, i) => `
+          <tr>
+            <td class="rank">${i + 1}</td>
+            <td class="text-left player-name"><strong>${p.playerName}</strong></td>
+            <td class="text-left">${p.teamCode}</td>
+            <td>${p.position}</td>
+            <td>${p.gamesPlayed}</td>
+            <td>${p.goals}</td>
+            <td>${p.assists}</td>
+            <td class="highlight"><strong>${p.points}</strong></td>
+            <td class="${p.plusMinus > 0 ? 'text-success' : p.plusMinus < 0 ? 'text-danger' : ''}">${p.plusMinus > 0 ? '+' : ''}${p.plusMinus}</td>
+            <td>${p.pim}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderGoaliesTable(players) {
+  return `
+    <table class="stats-table">
+      <thead>
+        <tr>
+          <th class="text-left">Rank</th>
+          <th class="text-left">Player</th>
+          <th class="text-left">Team</th>
+          <th>GP</th>
+          <th class="highlight">W</th>
+          <th>L</th>
+          <th>OTL</th>
+          <th>SA</th>
+          <th>SV</th>
+          <th>GA</th>
+          <th>GAA</th>
+          <th>SV%</th>
+          <th>SO</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${players.map((p, i) => `
+          <tr>
+            <td class="rank">${i + 1}</td>
+            <td class="text-left player-name"><strong>${p.playerName}</strong></td>
+            <td class="text-left">${p.teamCode}</td>
+            <td>${p.gamesPlayed}</td>
+            <td class="highlight"><strong>${p.wins}</strong></td>
+            <td>${p.losses}</td>
+            <td>${p.otLosses}</td>
+            <td>${p.shotsAgainst}</td>
+            <td>${p.saves}</td>
+            <td>${p.goalsAgainst}</td>
+            <td>${p.gaa}</td>
+            <td>${p.svPctDisplay}</td>
+            <td>${p.shutouts}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
 }
 
 function renderPlayoffs() {
@@ -4045,7 +5367,8 @@ async function showGameBoxScore(g) {
     try {
       const stats = typeof g.zamboniStats === 'string' ? JSON.parse(g.zamboniStats) : g.zamboniStats;
       const html = zbRenderCard(stats.home, stats.away, homeMgr, awayMgr, g.homeTeam, g.awayTeam);
-      $('modal-body').innerHTML = `<div style="margin:-18px">${html}</div>`;
+      const playerStatsHtml = renderPlayerStatsSection(g);
+      $('modal-body').innerHTML = `<div style="margin:-18px">${html}${playerStatsHtml}</div>`;
       $('modal-title').textContent = `${g.homeTeam} vs ${g.awayTeam}`;
       return;
     } catch (err) {
@@ -4054,10 +5377,17 @@ async function showGameBoxScore(g) {
   }
 
   if (!homeMgr?.zamboniTag || !awayMgr?.zamboniTag) {
-    // One or both managers don't have a Zamboni tag — nothing to show
-    $('modal-box').classList.remove('modal-wide');
-    showModal(`${g.homeTeam} ${g.homeScore}–${g.awayScore} ${g.awayTeam}`,
-      '<div class="empty-state">Box score unavailable — managers not linked to Zamboni.</div>');
+    // One or both managers don't have a Zamboni tag — show player stats if available
+    const playerStatsHtml = renderPlayerStatsSection(g);
+    const noStatsHtml = renderNoStatsSection(g);
+    if (playerStatsHtml) {
+      $('modal-body').innerHTML = `<div style="margin:-18px;padding:20px">${playerStatsHtml}</div>`;
+      $('modal-title').textContent = `${g.homeTeam} ${g.homeScore}–${g.awayScore} ${g.awayTeam}`;
+      return;
+    }
+    // Show "Add Stats" button even without Zamboni
+    $('modal-body').innerHTML = `<div style="margin:-18px;padding:20px">${noStatsHtml}</div>`;
+    $('modal-title').textContent = `${g.homeTeam} ${g.homeScore}–${g.awayScore} ${g.awayTeam}`;
     return;
   }
 
@@ -4084,6 +5414,13 @@ async function showGameBoxScore(g) {
   }
 
   if (!bestMatch) {
+    // No Zamboni match — show player stats if available
+    const playerStatsHtml = renderPlayerStatsSection(g);
+    if (playerStatsHtml) {
+      $('modal-body').innerHTML = `<div style="margin:-18px;padding:20px">${playerStatsHtml}</div>`;
+      $('modal-title').textContent = `${g.homeTeam} ${g.homeScore}–${g.awayScore} ${g.awayTeam}`;
+      return;
+    }
     $('modal-box').classList.remove('modal-wide');
     showModal(`${g.homeTeam} ${g.homeScore}–${g.awayScore} ${g.awayTeam}`,
       '<div class="empty-state">No matching Zamboni game found for this score.</div>');
@@ -4091,8 +5428,408 @@ async function showGameBoxScore(g) {
   }
 
   const html = zbRenderCard(bestMatch.hh, bestMatch.ah, homeMgr, awayMgr, g.homeTeam, g.awayTeam);
-  $('modal-body').innerHTML = `<div style="margin:-18px">${html}</div>`;
+  const playerStatsHtml = renderPlayerStatsSection(g);
+  $('modal-body').innerHTML = `<div style="margin:-18px">${html}${playerStatsHtml}</div>`;
   $('modal-title').textContent = `${g.homeTeam} vs ${g.awayTeam}`;
+}
+
+function renderPlayerStatsSection(game) {
+  if (!game.playerStats || game.playerStats.length === 0) {
+    return '';
+  }
+  
+  const homeStats = game.playerStats.filter(p => p.teamCode === game.homeTeam);
+  const awayStats = game.playerStats.filter(p => p.teamCode === game.awayTeam);
+  
+  const homeGoalies = homeStats.filter(p => p.position === 'G');
+  const awayGoalies = awayStats.filter(p => p.position === 'G');
+  const homeSkaters = homeStats.filter(p => p.position !== 'G');
+  const awaySkaters = awayStats.filter(p => p.position !== 'G');
+  
+  const skaterRow = (ps) => {
+    const player = state.players.find(p => String(p.id) === String(ps.playerId));
+    const name = player?.name || ps.playerName || 'Unknown';
+    const pos = player?.position || '';
+    return `
+      <tr>
+        <td class="text-left"><strong>${name}</strong> ${pos ? `<span class="text-xs text-muted">${pos}</span>` : ''}</td>
+        <td>${ps.goals || 0}</td>
+        <td>${ps.assists || 0}</td>
+        <td class="font-bold">${ps.points || 0}</td>
+        <td>${ps.plusMinus > 0 ? '+' : ''}${ps.plusMinus || 0}</td>
+        <td>${ps.pim || 0}</td>
+      </tr>
+    `;
+  };
+  
+  const goalieRow = (ps) => {
+    const player = state.players.find(p => String(p.id) === String(ps.playerId));
+    const name = player?.name || ps.playerName || 'Unknown';
+    const svp = ps.savePercentage ? (ps.savePercentage * 100).toFixed(1) : '0.0';
+    const svpFormatted = `.${svp.replace('.', '').padStart(3, '0')}`;
+    return `
+      <tr>
+        <td class="text-left"><strong>${name}</strong></td>
+        <td>${ps.shotsAgainst || 0}</td>
+        <td>${ps.saves || 0}</td>
+        <td>${ps.goalsAgainst || 0}</td>
+        <td class="font-bold">${svpFormatted}</td>
+        <td>${ps.shutout ? '✓' : ''}</td>
+      </tr>
+    `;
+  };
+  
+  const goalieTable = (goalies, teamName) => {
+    if (!goalies || goalies.length === 0) return '';
+    
+    return `
+      <div class="player-stats-section mb-12">
+        <h4 class="player-stats-header">${teamName} Goalie</h4>
+        <div class="table-wrap">
+          <table class="player-stats-table">
+            <thead>
+              <tr>
+                <th class="text-left">Goalie</th>
+                <th>SA</th>
+                <th>SV</th>
+                <th>GA</th>
+                <th>SV%</th>
+                <th>SO</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${goalies.map(goalieRow).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  };
+  
+  const skaterTable = (skaters, teamName) => {
+    if (!skaters || skaters.length === 0) return '';
+    
+    // Sort by points descending
+    const sorted = [...skaters].sort((a, b) => (b.points || 0) - (a.points || 0));
+    
+    return `
+      <div class="player-stats-section">
+        <h4 class="player-stats-header">${teamName} Skaters</h4>
+        <div class="table-wrap">
+          <table class="player-stats-table">
+            <thead>
+              <tr>
+                <th class="text-left">Player</th>
+                <th>G</th>
+                <th>A</th>
+                <th>PTS</th>
+                <th>+/-</th>
+                <th>PIM</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${sorted.map(skaterRow).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  };
+  
+  const homeGoalieTable = goalieTable(homeGoalies, game.homeTeam);
+  const awayGoalieTable = goalieTable(awayGoalies, game.awayTeam);
+  const homeSkaterTable = skaterTable(homeSkaters, game.homeTeam);
+  const awaySkaterTable = skaterTable(awaySkaters, game.awayTeam);
+  
+  if (!homeGoalieTable && !awayGoalieTable && !homeSkaterTable && !awaySkaterTable) return '';
+  
+  const sourceLabel = game.statsSource === 'manual' ? 'Manually Entered' : 
+                      game.statsSource === 'ocr_full' ? 'OCR Extracted (Full)' :
+                      game.statsSource === 'ocr_goals_only' ? 'OCR Extracted (Goals Only)' : '';
+  
+  return `
+    <div class="player-stats-container">
+      <div class="player-stats-title">
+        <h3>Player Statistics</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+          ${sourceLabel ? `<span class="player-stats-source">${sourceLabel}</span>` : ''}
+          <button class="btn btn-xs btn-secondary" onclick="openEditStatsModal('${game.id}')">✏️ Edit Stats</button>
+        </div>
+      </div>
+      <div class="player-stats-grid">
+        <div>
+          ${homeGoalieTable}
+          ${homeSkaterTable}
+        </div>
+        <div>
+          ${awayGoalieTable}
+          ${awaySkaterTable}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderNoStatsSection(game) {
+  if (!FEATURE_FLAGS.ENABLE_MANUAL_STATS) {
+    return ''; // Don't show anything if stats are disabled
+  }
+  
+  return `
+    <div class="player-stats-container">
+      <div class="player-stats-title">
+        <h3>Player Statistics</h3>
+      </div>
+      <div class="empty-state" style="padding:40px 20px">
+        <p class="text-dim">No player stats recorded for this game</p>
+        <button class="btn btn-primary btn-sm mt-12" onclick="openEditStatsModal('${game.id}')">Add Player Stats</button>
+      </div>
+    </div>
+  `;
+}
+
+async function openEditStatsModal(gameId) {
+  const game = state.games.find(g => g.id === gameId);
+  if (!game || !game.played) {
+    toast('Game not found or not played yet', 'error');
+    return;
+  }
+  
+  hideModal(); // Close the box score modal
+  
+  // Wait a bit for modal to close
+  await new Promise(resolve => setTimeout(resolve, 100));
+  
+  // Open the player stats modal with existing stats pre-filled
+  openPlayerStatsEditModal(game);
+}
+
+function openPlayerStatsEditModal(game) {
+  const homeRoster = state.players.filter(p => p.teamCode === game.homeTeam);
+  const awayRoster = state.players.filter(p => p.teamCode === game.awayTeam);
+  
+  const homeGoalies = homeRoster.filter(p => p.position === 'G');
+  const awayGoalies = awayRoster.filter(p => p.position === 'G');
+  const homeSkaters = homeRoster.filter(p => p.position !== 'G');
+  const awaySkaters = awayRoster.filter(p => p.position !== 'G');
+  
+  // Get existing stats
+  const existingStats = game.playerStats || [];
+  
+  const skaterRow = (p, team) => {
+    const existing = existingStats.find(s => String(s.playerId) === String(p.id) && s.position !== 'G');
+    return `
+    <tr data-player-id="${p.id}" data-team="${team}" data-position="skater">
+      <td class="text-left"><strong>${p.name}</strong> <span class="text-xs text-muted">${p.position || ''}</span></td>
+      <td><input type="number" class="stat-input stat-g" min="0" max="9" value="${existing?.goals || 0}" inputmode="numeric"></td>
+      <td><input type="number" class="stat-input stat-a" min="0" max="9" value="${existing?.assists || 0}" inputmode="numeric"></td>
+      <td><input type="number" class="stat-input stat-pm" min="-9" max="9" value="${existing?.plusMinus || 0}" inputmode="numeric"></td>
+      <td><input type="number" class="stat-input stat-pim" min="0" max="99" value="${existing?.pim || 0}" inputmode="numeric"></td>
+    </tr>
+  `;
+  };
+  
+  const goalieSelect = (goalies, team, opponentScore) => {
+    if (!goalies || goalies.length === 0) {
+      return '<tr><td colspan="6" class="text-dim text-center">No goalies on roster</td></tr>';
+    }
+    
+    const existing = existingStats.find(s => s.teamCode === team && s.position === 'G');
+    const selectedId = existing?.playerId || '';
+    
+    return `
+      <tr data-team="${team}" data-position="goalie" ${selectedId ? `data-player-id="${selectedId}"` : ''}>
+        <td class="text-left">
+          <select class="goalie-select" data-team="${team}">
+            <option value="">— Select Goalie —</option>
+            ${goalies.map(g => `<option value="${g.id}" ${String(g.id) === String(selectedId) ? 'selected' : ''}>${g.name}</option>`).join('')}
+          </select>
+        </td>
+        <td><input type="number" class="stat-input stat-sa" min="0" max="99" value="${existing?.shotsAgainst || 0}" inputmode="numeric" ${selectedId ? '' : 'disabled'}></td>
+        <td><input type="number" class="stat-input stat-sv" min="0" max="99" value="${existing?.saves || 0}" inputmode="numeric" ${selectedId ? '' : 'disabled'}></td>
+        <td><input type="number" class="stat-input stat-ga" min="0" max="99" value="${existing?.goalsAgainst || opponentScore}" inputmode="numeric" ${selectedId ? '' : 'disabled'}></td>
+        <td class="stat-svp">${existing && existing.shotsAgainst > 0 ? `.${(existing.savePercentage * 100).toFixed(1).replace('.', '').padStart(3, '0')}` : '—'}</td>
+        <td><label class="stat-so-check"><input type="checkbox" class="stat-so" ${existing?.shutout ? 'checked' : ''} ${selectedId ? '' : 'disabled'}> SO</label></td>
+      </tr>
+    `;
+  };
+  
+  showModal(`Edit Player Stats — ${game.homeTeam} ${game.homeScore}-${game.awayScore} ${game.awayTeam}`, `
+    <div class="portal-stats-manual-section">
+      <p class="text-xs text-muted mb-8">Update player stats for this game</p>
+      
+      <!-- HOME TEAM -->
+      <h4 class="text-sm font-bold mb-4 mt-16">${game.homeTeam} Goalies</h4>
+      <div class="table-wrap mb-12">
+        <table class="portal-stats-table">
+          <thead>
+            <tr>
+              <th class="text-left">Goalie</th>
+              <th>SA</th>
+              <th>SV</th>
+              <th>GA</th>
+              <th>SV%</th>
+              <th>SO</th>
+            </tr>
+          </thead>
+          <tbody id="home-goalies-body">
+            ${goalieSelect(homeGoalies, game.homeTeam, game.awayScore)}
+          </tbody>
+        </table>
+      </div>
+      
+      <h4 class="text-sm font-bold mb-4">${game.homeTeam} Skaters</h4>
+      <div class="table-wrap mb-12" style="max-height:200px;overflow-y:auto">
+        <table class="portal-stats-table">
+          <thead>
+            <tr>
+              <th class="text-left">Player</th>
+              <th>G</th>
+              <th>A</th>
+              <th>+/-</th>
+              <th>PIM</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${homeSkaters.map(p => skaterRow(p, game.homeTeam)).join('')}
+          </tbody>
+        </table>
+      </div>
+      
+      <!-- AWAY TEAM -->
+      <h4 class="text-sm font-bold mb-4 mt-16">${game.awayTeam} Goalies</h4>
+      <div class="table-wrap mb-12">
+        <table class="portal-stats-table">
+          <thead>
+            <tr>
+              <th class="text-left">Goalie</th>
+              <th>SA</th>
+              <th>SV</th>
+              <th>GA</th>
+              <th>SV%</th>
+              <th>SO</th>
+            </tr>
+          </thead>
+          <tbody id="away-goalies-body">
+            ${goalieSelect(awayGoalies, game.awayTeam, game.homeScore)}
+          </tbody>
+        </table>
+      </div>
+      
+      <h4 class="text-sm font-bold mb-4">${game.awayTeam} Skaters</h4>
+      <div class="table-wrap mb-12" style="max-height:200px;overflow-y:auto">
+        <table class="portal-stats-table">
+          <thead>
+            <tr>
+              <th class="text-left">Player</th>
+              <th>G</th>
+              <th>A</th>
+              <th>+/-</th>
+              <th>PIM</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${awaySkaters.map(p => skaterRow(p, game.awayTeam)).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    
+    <button id="modal-ok" class="btn btn-primary btn-block mt-12">Save Stats</button>
+    <button id="modal-cancel" class="btn btn-ghost btn-block mt-8" type="button">Cancel</button>
+  `, async () => {
+    const playerStats = collectPlayerStats();
+    
+    // Validate stats
+    const validation = validatePlayerStats(playerStats, game.homeTeam, game.awayTeam, game.homeScore, game.awayScore);
+    if (!validation.valid) {
+      toast(validation.error, 'error');
+      return;
+    }
+    
+    const btn = $('modal-ok');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+    }
+    
+    try {
+      await updateGameStats(game.id, playerStats);
+      hideModal();
+      toast('Stats updated successfully', 'success');
+      
+      // Reload state and re-render
+      state = await loadState();
+      renderSection(currentSection);
+    } catch (err) {
+      toast(err.message || 'Failed to update stats', 'error');
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Save Stats';
+      }
+    }
+  });
+  
+  // Enable goalie stats inputs when goalie is selected
+  document.querySelectorAll('.goalie-select').forEach(select => {
+    const row = select.closest('tr');
+    const inputs = row.querySelectorAll('.stat-input, .stat-so');
+    
+    select.addEventListener('change', () => {
+      const selected = select.value;
+      inputs.forEach(input => {
+        input.disabled = !selected;
+      });
+      
+      if (selected) {
+        row.dataset.playerId = selected;
+      } else {
+        delete row.dataset.playerId;
+      }
+    });
+  });
+  
+  // Auto-calculate save percentage
+  document.querySelectorAll('[data-position="goalie"]').forEach(row => {
+    const saInput = row.querySelector('.stat-sa');
+    const svInput = row.querySelector('.stat-sv');
+    const svpCell = row.querySelector('.stat-svp');
+    
+    const updateSvp = () => {
+      const sa = parseInt(saInput?.value, 10) || 0;
+      const sv = parseInt(svInput?.value, 10) || 0;
+      if (sa > 0) {
+        const svp = (sv / sa * 100).toFixed(1);
+        svpCell.textContent = `.${svp.replace('.', '').padStart(3, '0')}`;
+      } else {
+        svpCell.textContent = '—';
+      }
+    };
+    
+    saInput?.addEventListener('input', updateSvp);
+    svInput?.addEventListener('input', updateSvp);
+  });
+  
+  $('modal-cancel')?.addEventListener('click', () => hideModal());
+}
+
+async function updateGameStats(gameId, playerStats) {
+  const r = await fetch('/api/admin/game-stats', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      gameId,
+      playerStats,
+      statsSource: 'manual'
+    })
+  });
+  
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.error || 'Failed to update stats');
+  }
+  
+  return await r.json();
 }
 
 async function fetchNHLRosters({ silent = false } = {}) {
@@ -4249,87 +5986,7 @@ function viewSeasonModal(seasonId) {
   `);
 }
 
-async function loadPendingTrades() {
-  const container = $('pending-trades-list');
-  if (!container) return;
-  
-  try {
-    const r = await _apiFetch('/api/pending?status=pending', {
-      headers: { 'Authorization': `Bearer ${_adminToken}` }
-    });
-    const pending = await r.json();
-    
-    if (!pending.length) {
-      container.innerHTML = '<div class="empty-state" style="padding:40px 0"><span class="empty-icon">✅</span><p>No pending trades</p></div>';
-      return;
-    }
-    
-    container.innerHTML = pending.map(req => {
-      const payload = req.payload;
-      const fmtPlayers = (arr) => arr && arr.length ? arr.join(', ') : '—';
-      const submittedAgo = req.submitted_at ? timeSince(new Date(req.submitted_at)) : '';
-      
-      return `
-        <div class="pending-trade-card" data-req-id="${req.id}">
-          <div class="pending-trade-header">
-            <div class="pending-trade-teams">${payload.fromTeam} ⇌ ${payload.toTeam}</div>
-            <div class="pending-trade-meta">Proposed by ${req.submitted_name} · ${submittedAgo}</div>
-          </div>
-          <div class="pending-trade-body">
-            <div class="pending-trade-side">
-              <div class="pending-trade-label">${payload.fromTeam} sends</div>
-              <div class="pending-trade-players">${fmtPlayers(payload.playersSent)}</div>
-            </div>
-            <div class="pending-trade-side">
-              <div class="pending-trade-label">${payload.toTeam} sends</div>
-              <div class="pending-trade-players">${fmtPlayers(payload.playersReceived)}</div>
-            </div>
-          </div>
-          <div class="pending-trade-actions">
-            <button class="btn btn-success btn-sm approve-trade-btn" data-req-id="${req.id}">✅ Approve</button>
-            <button class="btn btn-ghost btn-sm reject-trade-btn" data-req-id="${req.id}">❌ Reject</button>
-          </div>
-        </div>
-      `;
-    }).join('');
-    
-    document.querySelectorAll('.approve-trade-btn').forEach(btn => {
-      btn.addEventListener('click', () => reviewTrade(btn.dataset.reqId, 'approve'));
-    });
-    document.querySelectorAll('.reject-trade-btn').forEach(btn => {
-      btn.addEventListener('click', () => reviewTrade(btn.dataset.reqId, 'reject'));
-    });
-    
-  } catch (e) {
-    container.innerHTML = '<div class="text-dim" style="padding:20px">Failed to load pending trades</div>';
-  }
-}
-
-async function reviewTrade(reqId, action) {
-  try {
-    const r = await _apiFetch(`/api/pending/${reqId}`, {
-      method: 'PATCH',
-      headers: { 
-        'Authorization': `Bearer ${_adminToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ action })
-    });
-    
-    if (!r.ok) {
-      toast('Failed to ' + action + ' trade', 'error');
-      return;
-    }
-    
-    toast('Trade ' + (action === 'approve' ? 'approved' : 'rejected'), 'success');
-    loadPendingTrades();
-    checkPendingTrades();
-    state = await loadState();
-    renderTrades();
-  } catch (e) {
-    toast('Error reviewing trade', 'error');
-  }
-}
+// Admin pending trade review moved to admin-pending.js
 
 function timeSince(date) {
   const seconds = Math.floor((new Date() - date) / 1000);
@@ -4520,8 +6177,24 @@ function renderSettings() {
         <div class="form-row"><label>League Name</label><input id="set-league-name" value="${state.league.name}" ${isAdmin?'':'readonly'}></div>
         <div class="form-row"><label>Season</label><input id="set-season" value="${state.league.season||''}" placeholder="e.g. 2024-25" ${isAdmin?'':'readonly'}></div>
         ${isAdmin ? `
+          <div class="form-row">
+            <label style="display:flex;align-items:center;gap:8px">
+              <input type="checkbox" id="set-draft-enabled" ${state.league.draftEnabled?'checked':''}>
+              <span>Enable Draft (show Draft nav button)</span>
+            </label>
+          </div>
           <div class="form-row"><label>Admin Password</label><input type="password" id="set-admin-pw" placeholder="Set new password"></div>
-          <button class="btn btn-primary" id="save-league-btn">Save</button>` : ''}
+          <button class="btn btn-primary" id="save-league-btn">Save</button>
+          
+          ${state.liveDraft?.active ? `
+            <hr style="margin:24px 0;border:none;border-top:1px solid var(--border)">
+            <div class="form-row">
+              <label style="color:var(--danger)">⚠️ Draft Management</label>
+              <p class="text-xs text-dim mb-8">Draft is currently active with ${state.liveDraft.picks?.length || 0} picks made.</p>
+              <button class="btn btn-danger btn-sm" id="reset-draft-btn">Reset Draft (Clear All Picks)</button>
+            </div>
+          ` : ''}
+        ` : ''}
       </div>`; break;
 
     case 'seasons': _html = `
@@ -4637,6 +6310,16 @@ function renderSettings() {
 
     case 'sysdata': _html = isAdmin ? `
       <div class="card">
+        <div class="card-title">Player Attributes (Recommended)</div>
+        <p class="text-xs text-muted mb-12">Upload <code>player_attributes.json</code> generated from the DLL for 100% accurate attributes.</p>
+        <input type="file" id="attributes-json-input" style="display:none" accept=".json">
+        <button class="btn btn-primary" id="upload-attributes-btn">📤 Upload player_attributes.json</button>
+        <div class="text-xs text-dim mt-8">
+          Players with attributes: ${state.players.filter(p => p.attributes).length}/${state.players.length}
+        </div>
+      </div>
+      
+      <div class="card mt-12">
         <div class="card-title">SYS-DATA Distribution</div>
         <p class="text-xs text-muted mb-12">Upload the SYS-DATA file here. All league members can download it directly from the dashboard — no sharing links needed.</p>
         ${sysData ? `
@@ -4968,10 +6651,12 @@ function renderSettings() {
       $('save-league-btn')?.addEventListener('click', () => {
         state.league.name = $('set-league-name').value;
         state.league.season = $('set-season').value;
+        state.league.draftEnabled = $('set-draft-enabled')?.checked || false;
         const newPw = $('set-admin-pw')?.value?.trim() || '';
         const saveLeague = async () => {
           saveState();
           $('league-title').textContent = state.league.name;
+          updateDraftVisibility();
           renderSettings();
           toast('League settings saved', 'success');
         };
@@ -4988,6 +6673,24 @@ function renderSettings() {
           })
           .catch(() => toast('Password update failed', 'error'));
       });
+      
+      $('reset-draft-btn')?.addEventListener('click', () => {
+        if (!confirm('⚠️ Reset Draft?\n\nThis will clear all draft picks and queues. Player team assignments will NOT be reversed.\n\nThis action cannot be undone!')) return;
+        
+        const prevAuto = state.liveDraft?.autoManagers || [];
+        state.liveDraft = { 
+          active: false, 
+          rounds: 1, 
+          order: [], 
+          picks: [], 
+          autoManagers: prevAuto,
+          playerQueues: {}
+        };
+        saveState();
+        renderSettings();
+        toast('Draft has been reset', 'success');
+      });
+      
       break;
     }
 
@@ -5104,6 +6807,31 @@ function renderSettings() {
     }
 
     case 'sysdata': {
+      // Player attributes JSON upload
+      $('upload-attributes-btn')?.addEventListener('click', () => $('attributes-json-input')?.click());
+      $('attributes-json-input')?.addEventListener('change', async e => {
+        const file = e.target.files[0];
+        if (!file) return;
+        if (!file.name.endsWith('.json')) { toast('Please upload a .json file', 'error'); return; }
+        try {
+          const fd = new FormData();
+          fd.append('file', file);
+          const r = await fetch('/api/sysdata/attributes', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${_adminToken}` },
+            body: fd,
+          });
+          if (!r.ok) { toast('Upload failed', 'error'); return; }
+          const result = await r.json();
+          await loadState();
+          renderSettings();
+          toast(`✅ ${result.stats.players_updated} players updated with attributes!`, 'success');
+        } catch (err) {
+          toast('Upload error: ' + err.message, 'error');
+        }
+      });
+      
+      // SYS-DATA file upload
       $('upload-sysdata-btn')?.addEventListener('click', () => $('sysdata-file-input')?.click());
       $('sysdata-file-input')?.addEventListener('change', async e => {
         const file = e.target.files[0];
@@ -5357,6 +7085,12 @@ function handleAdminToggle() {
 // ================================================================
 // 17. INIT
 // ================================================================
+function updateDraftVisibility() {
+  const draftBtn = $('draft-nav-btn');
+  if (!draftBtn) return;
+  draftBtn.style.display = state.league.draftEnabled ? '' : 'none';
+}
+
 async function init() {
   // Load state from API (or localStorage fallback) before rendering anything
   state = await loadState();
@@ -5365,6 +7099,10 @@ async function init() {
   await verifyAdminSession();
   await loadPortalSession();
   if (_portalSession?.user && !_portalSession?.linked) await loadPortalLinkOptions();
+
+  // Show/hide features based on flags
+  const statsBtn = $('stats-nav-btn');
+  if (statsBtn) statsBtn.style.display = FEATURE_FLAGS.ENABLE_PLAYER_STATS ? '' : 'none';
 
   // Navigation
   document.querySelectorAll('.nav-btn').forEach(btn => {
@@ -5393,6 +7131,9 @@ async function init() {
   // Set league title
   $('league-title').textContent = state.league.name || 'NHL Legacy League';
 
+  // Update Draft nav button visibility
+  updateDraftVisibility();
+
   // Render initial section
   renderSection('dashboard');
   updateAdminUI();
@@ -5414,5 +7155,192 @@ async function init() {
     }, 500);
   }
 }
+
+// ================================================================
+// LIVE UPDATES TEST - DISABLED
+// ================================================================
+// Removed from dashboard - was causing issues
+/*
+let _liveTestRunning = false;
+let _liveTestInterval = null;
+
+async function startLiveUpdatesTest() {
+  const btn = $('test-live-updates-btn');
+  if (!btn) return;
+  
+  if (_liveTestRunning) {
+    // Stop test
+    _liveTestRunning = false;
+    clearInterval(_liveTestInterval);
+    btn.textContent = '▶️ Start Test';
+    btn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+    toast('Live updates test stopped', 'info');
+    return;
+  }
+  
+  // Start test
+  _liveTestRunning = true;
+  btn.textContent = '⏹️ Stop Test';
+  btn.style.background = 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)';
+  toast('Live updates test started - watch for notifications!', 'success');
+  
+  // Submit scores every 3 seconds
+  _liveTestInterval = setInterval(async () => {
+    if (!_liveTestRunning) return;
+    
+    // Reload state first to get latest data
+    const fresh = await loadState();
+    if (fresh) {
+      Object.assign(state, fresh, { sysDataFile: state.sysDataFile });
+    }
+    
+    // Find an unplayed game
+    let unplayed = state.games.filter(g => !g.played && !g.playoff);
+    
+    // If no unplayed games, reset all games to unplayed and start over
+    if (!unplayed.length) {
+      console.log('[Test] No unplayed games - resetting all games');
+      toast('🔄 Resetting schedule - starting new season!', 'info');
+      
+      state.games.forEach(g => {
+        if (!g.playoff) {
+          g.played = false;
+          delete g.homeScore;
+          delete g.awayScore;
+          delete g.winner;
+          delete g.ot;
+          delete g.postedAt;
+          delete g.playedAt;
+          delete g.playerStats;
+        }
+      });
+      
+      // Save the reset state
+      await saveState();
+      
+      unplayed = state.games.filter(g => !g.played && !g.playoff);
+      
+      if (!unplayed.length) {
+        toast('No games in schedule - stopping test', 'warning');
+        startLiveUpdatesTest(); // Stop
+        return;
+      }
+    }
+    
+    const game = unplayed[0]; // Take the first unplayed game (consistent order)
+    const homeScore = Math.floor(Math.random() * 7);
+    const awayScore = Math.floor(Math.random() * 7);
+    
+    // Get players from both teams for stats
+    const homePlayers = state.players.filter(p => p.teamCode === game.homeTeam).slice(0, 6);
+    const awayPlayers = state.players.filter(p => p.teamCode === game.awayTeam).slice(0, 6);
+    
+    // Generate random stats for players
+    const generatePlayerStats = (players, teamCode, teamScore, opponentScore) => {
+      if (!players.length) return [];
+      const stats = [];
+      
+      // Get skaters and goalies
+      const skaters = players.filter(p => p.position !== 'G');
+      const goalies = players.filter(p => p.position === 'G');
+      
+      if (!skaters.length) return stats;
+      
+      // Distribute goals among skaters to match team score EXACTLY
+      let goalsLeft = teamScore;
+      const goalScorers = [];
+      
+      // Randomly assign goals to players
+      while (goalsLeft > 0 && goalScorers.length < Math.min(skaters.length, 4)) {
+        const goalsForThisPlayer = Math.min(goalsLeft, Math.floor(Math.random() * 3) + 1);
+        goalScorers.push(goalsForThisPlayer);
+        goalsLeft -= goalsForThisPlayer;
+      }
+      
+      // If still goals left, add them to random scorers
+      while (goalsLeft > 0) {
+        const idx = Math.floor(Math.random() * goalScorers.length);
+        goalScorers[idx]++;
+        goalsLeft--;
+      }
+      
+      // Generate stats for up to 6 skaters
+      for (let i = 0; i < Math.min(skaters.length, 6); i++) {
+        const p = skaters[i];
+        const goals = i < goalScorers.length ? goalScorers[i] : 0;
+        const assists = Math.floor(Math.random() * Math.min(teamScore, 3));
+        const pim = Math.floor(Math.random() * 4);
+        const plusMinus = Math.floor(Math.random() * 5) - 2;
+        
+        stats.push({
+          playerId: p.id,
+          playerName: p.name,
+          teamCode: teamCode,
+          position: p.position,
+          goals,
+          assists,
+          points: goals + assists,
+          pim,
+          plusMinus
+        });
+      }
+      
+      // Generate goalie stats (pick one goalie)
+      if (goalies.length > 0) {
+        const goalie = goalies[0];
+        const goalsAgainst = opponentScore;
+        const shotsAgainst = goalsAgainst + Math.floor(Math.random() * 20) + 10; // 10-30 shots
+        const saves = shotsAgainst - goalsAgainst;
+        const savePercentage = shotsAgainst > 0 ? saves / shotsAgainst : 0;
+        
+        stats.push({
+          playerId: goalie.id,
+          playerName: goalie.name,
+          teamCode: teamCode,
+          position: 'G',
+          shotsAgainst,
+          saves,
+          goalsAgainst,
+          savePercentage,
+          shutout: goalsAgainst === 0
+        });
+      }
+      
+      return stats;
+    };
+    
+    const homeStats = generatePlayerStats(homePlayers, game.homeTeam, homeScore, awayScore);
+    const awayStats = generatePlayerStats(awayPlayers, game.awayTeam, awayScore, homeScore);
+    
+    console.log(`[Test] Generated stats: ${homeStats.length} home, ${awayStats.length} away`);
+    
+    try {
+      const resp = await fetch('/api/bot/score', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Bot-Secret': 'crisply!wrongly!spoiled!cringing!definite'
+        },
+        body: JSON.stringify({
+          gameId: game.id,
+          homeScore,
+          awayScore,
+          ot: Math.random() > 0.8,
+          homeStats,
+          awayStats
+        })
+      });
+      
+      if (resp.ok) {
+        const statsCount = homeStats.length + awayStats.length;
+        console.log(`[Test] ⚽ Score submitted: ${game.homeTeam} ${homeScore} - ${awayScore} ${game.awayTeam} (${statsCount} player stats)`);
+        toast(`⚽ ${game.homeTeam} ${homeScore} - ${awayScore} ${game.awayTeam} + stats`, 'success');
+      }
+    } catch (err) {
+      console.error('[Test] Score submission failed:', err);
+    }
+  }, 3000);
+}
+*/
 
 document.addEventListener('DOMContentLoaded', init);

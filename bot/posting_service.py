@@ -5,15 +5,66 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List
-
-import discord
+from typing import Dict, Any, List
 from discord.ext import tasks
+import discord
+import aiohttp
+import random
 
 from bot import api, config
 from bot.embeds import score_result_embed, trade_result_embed
 
 log = logging.getLogger('nhl-bot')
+
+# Tenor API key (free tier)
+TENOR_API_KEY = "AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCYQ"  # Public key for testing
+
+async def get_team_gif(team_code: str) -> str | None:
+    """Fetch a random NHL team GIF from Tenor"""
+    
+    # Map team codes to full team names for better GIF search results
+    team_names = {
+        'ANA': 'Anaheim Ducks', 'BOS': 'Boston Bruins', 'BUF': 'Buffalo Sabres',
+        'CAR': 'Carolina Hurricanes', 'CBJ': 'Columbus Blue Jackets', 'CGY': 'Calgary Flames',
+        'CHI': 'Chicago Blackhawks', 'COL': 'Colorado Avalanche', 'DAL': 'Dallas Stars',
+        'DET': 'Detroit Red Wings', 'EDM': 'Edmonton Oilers', 'FLA': 'Florida Panthers',
+        'LAK': 'Los Angeles Kings', 'MIN': 'Minnesota Wild', 'MTL': 'Montreal Canadiens',
+        'NJD': 'New Jersey Devils', 'NSH': 'Nashville Predators', 'NYI': 'New York Islanders',
+        'NYR': 'New York Rangers', 'OTT': 'Ottawa Senators', 'PHI': 'Philadelphia Flyers',
+        'PIT': 'Pittsburgh Penguins', 'SEA': 'Seattle Kraken', 'SJS': 'San Jose Sharks',
+        'STL': 'St Louis Blues', 'TBL': 'Tampa Bay Lightning', 'TOR': 'Toronto Maple Leafs',
+        'UTA': 'Utah Hockey Club', 'VAN': 'Vancouver Canucks', 'VGK': 'Vegas Golden Knights',
+        'WPG': 'Winnipeg Jets', 'WSH': 'Washington Capitals'
+    }
+    
+    try:
+        team_name = team_names.get(team_code, team_code)
+        
+        # Try multiple search strategies for better results
+        search_terms = [
+            f"{team_name} goal",           # Team goal celebrations
+            f"{team_name} celebration",    # General celebrations
+            f"{team_name} hockey"          # Fallback
+        ]
+        
+        for search_term in search_terms:
+            url = f"https://tenor.googleapis.com/v2/search?q={search_term}&key={TENOR_API_KEY}&client_key=zamboni_league&limit=20&media_filter=gif&contentfilter=medium"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        results = data.get('results', [])
+                        if results:
+                            # Pick a random GIF from results
+                            gif = random.choice(results)
+                            log.info(f'Found GIF for {team_code} using search: "{search_term}"')
+                            return gif['media_formats']['gif']['url']
+        
+        return None
+    except Exception as e:
+        log.warning(f'Failed to fetch GIF for {team_code}: {e}')
+        return None
 
 
 class PostingService:
@@ -58,6 +109,8 @@ class PostingService:
         event_type = event.get('eventType')
         payload = event.get('payload') or {}
 
+        if event_type == 'draft_pick':
+            return await self._handle_draft_pick(payload)
         if event_type == 'score_final':
             return await self._handle_score_event(payload)
         if event_type == 'trade_final':
@@ -72,6 +125,37 @@ class PostingService:
         log.info('Unhandled bot event type: %s', event_type)
         return False
 
+    async def _handle_draft_pick(self, payload: Dict[str, Any]) -> bool:
+        ch_id = config.SCORES_CHANNEL  # Use scores channel for draft picks
+        guild = self.bot.get_guild(config.GUILD_ID) if config.GUILD_ID else None
+        channel = guild.get_channel(ch_id) if guild and ch_id else None
+
+        log.info(f'Draft pick: guild={guild}, ch_id={ch_id}, channel={channel}')
+
+        if not channel:
+            log.warning('Draft pick event received but channel not configured')
+            return False
+
+        pick = payload.get('pick', {})
+        player_name = pick.get('playerName', 'Unknown Player')
+        position = pick.get('position', '')
+        manager_name = pick.get('managerName', 'Unknown Manager')
+        team_code = pick.get('teamCode', '')
+        pick_num = pick.get('pick', 0)
+        round_num = pick.get('round', 0)
+
+        # Simple message for draft picks
+        message = f"🎯 **Pick #{pick_num}** (Round {round_num}): **{manager_name}** ({team_code}) selects **{player_name}** ({position})"
+
+        try:
+            log.info(f'Sending draft pick message: {message[:50]}...')
+            await channel.send(message)
+            log.info('Draft pick posted successfully')
+            return True
+        except Exception as exc:
+            log.warning('Failed to post draft pick: %s', exc, exc_info=True)
+            return False
+
     async def _handle_score_event(self, payload: Dict[str, Any]) -> bool:
         ch_id = config.SCORES_CHANNEL
         guild = self.bot.get_guild(config.GUILD_ID) if config.GUILD_ID else None
@@ -84,6 +168,16 @@ class PostingService:
         # Fetch state for manager names (needed for embed helper)
         state = await api.get_state()
         embed = score_result_embed(payload, state, payload.get('approvedBy', 'website'))
+
+        # Determine winner and fetch GIF
+        home_score = payload.get('homeScore', 0)
+        away_score = payload.get('awayScore', 0)
+        winner_team = payload.get('homeTeam') if home_score > away_score else payload.get('awayTeam')
+        
+        gif_url = await get_team_gif(winner_team) if winner_team else None
+        if gif_url:
+            embed.set_image(url=gif_url)
+            log.info(f'Added GIF for winning team {winner_team}')
 
         view = discord.ui.View()
         view.add_item(discord.ui.Button(
